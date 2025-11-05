@@ -69,17 +69,24 @@ class ExpressionBuilder:
                 return False
             if not self.stack[-2].is_featured:
                 return False
+            if not self.stack[-2].has_temporal_variation:
+                return False
         elif issubclass(op, PairRollingOperator):
             if not isinstance(self.stack[-1], DeltaTime):
                 return False
             if not self.stack[-2].is_featured or not self.stack[-3].is_featured:
+                return False
+            if (not self.stack[-2].has_temporal_variation or
+                    not self.stack[-3].has_temporal_variation):
                 return False
         else:
             assert False
         return True
 
     def validate_dt(self) -> bool:
-        return len(self.stack) > 0 and self.stack[-1].is_featured
+        return (len(self.stack) > 0 and
+                self.stack[-1].is_featured and
+                self.stack[-1].has_temporal_variation)
 
     def validate_const(self) -> bool:
         return len(self.stack) == 0 or self.stack[-1].is_featured

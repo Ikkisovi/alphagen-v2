@@ -1,0 +1,191 @@
+# Ensemble Alpha Mining Configuration
+# This config defines parameters for multi-window ensemble factor training
+
+# ============================================================================
+# TIME WINDOWS
+# ============================================================================
+time_windows:
+  # Training windows (aligned to trading calendar)
+  train_12m:
+    name: "12m"
+    start_date: "2023-01-01"
+    end_date: "2023-12-31"
+    description: "12-month historical window"
+
+  train_6m:
+    name: "6m"
+    start_date: "2023-07-01"
+    end_date: "2023-12-31"
+    description: "6-month medium-term window"
+
+  train_3m:
+    name: "3m"
+    start_date: "2023-10-01"
+    end_date: "2023-12-31"
+    description: "3-month short-term window"
+
+  # Validation window for final ensemble optimization
+  validation:
+    start_date: "2024-01-01"
+    end_date: "2024-03-31"
+    description: "Q1 2024 validation period (matches 2024_01 deliverable)"
+
+# ============================================================================
+# UNIVERSE CONFIGURATION
+# ============================================================================
+universe:
+  base_instrument: "csi300"  # Base universe (csi300, csi500, or custom)
+
+  # Additional stocks for tech exposure
+  additional_stocks:
+    - "AAPL"   # Apple
+    - "GOOGL"  # Google/Alphabet
+    - "AMZN"   # Amazon
+    - "NVDA"   # NVIDIA
+    - "SNDK"   # SanDisk (or WDC if merged)
+
+  # Universe fingerprint for cache validation
+  fingerprint_file: "output/universe_fingerprint.json"
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Dual-stage training approach
+  stage1_technical:
+    enabled: true
+    max_episodes: 500
+    min_episodes: 400
+    early_stopping_patience: 30  # Stop after 30 flat episodes
+    target_candidates: 80        # Target ~80 candidate factors
+    use_fundamentals: false
+
+  stage2_fundamentals:
+    enabled: true
+    max_episodes: 500
+    min_episodes: 400
+    early_stopping_patience: 30
+    top_quartile_only: true      # Use top 25% from stage 1
+    target_factors_per_window: 20 # Prune to ~20 final factors
+    use_fundamentals: true
+
+  # Pool configuration per window
+  pool_capacity_per_window: 25   # Capacity for each training window
+
+  # PPO/RL hyperparameters
+  ppo:
+    learning_rate: 0.0001
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_epsilon: 0.2
+    entropy_coef: 0.01
+    value_loss_coef: 0.5
+
+  # Device configuration
+  device: "cuda:0"  # Use GPU if available, fallback to CPU
+
+# ============================================================================
+# FUNDAMENTAL FEATURES
+# ============================================================================
+fundamental_features:
+  # Valuation ratios
+  - "PERatio"          # Price-to-Earnings
+  - "PBRatio"          # Price-to-Book
+  - "PSRatio"          # Price-to-Sales
+  - "EVToEBITDA"       # Enterprise Value to EBITDA
+  - "EVToRevenue"      # Enterprise Value to Revenue
+  - "EVToFCF"          # Enterprise Value to Free Cash Flow
+
+  # Yield metrics
+  - "EarningYield"     # Earnings Yield (inverse of P/E)
+  - "FCFYield"         # Free Cash Flow Yield
+  - "SalesYield"       # Sales Yield (inverse of P/S)
+  - "DividendYield"    # Dividend Yield
+
+  # Growth metrics
+  - "RevenueGrowth"    # Revenue growth rate
+  - "EarningsGrowth"   # Earnings growth rate
+  - "BookValueGrowth"  # Book value growth rate
+
+  # Financial health
+  - "DebtToAssets"     # Debt to Assets ratio
+  - "DebtToEquity"     # Debt to Equity ratio
+  - "CurrentRatio"     # Current Ratio (liquidity)
+  - "QuickRatio"       # Quick Ratio
+
+  # Profitability
+  - "ROE"              # Return on Equity
+  - "ROA"              # Return on Assets
+  - "ROIC"             # Return on Invested Capital
+  - "GrossMargin"      # Gross Profit Margin
+  - "OperatingMargin"  # Operating Profit Margin
+  - "NetMargin"        # Net Profit Margin
+
+# ============================================================================
+# ENSEMBLE CONFIGURATION
+# ============================================================================
+ensemble:
+  # Merging settings
+  final_capacity: 45               # Maximum factors in final ensemble
+  auto_prune_weak_factors: true    # Let optimizer drop weak contributors
+
+  # Optimization settings
+  optimizer:
+    learning_rate: 0.0005
+    max_steps: 10000
+    tolerance: 500
+    l1_alpha: 0.005                # L1 regularization strength
+
+  # Cross-validation shrinkage
+  cross_validation:
+    enabled: true
+    n_folds: 5
+    shrinkage_factor: 0.9          # Weight shrinkage to reduce overfitting
+
+  # IC thresholds
+  ic_lower_bound: 0.01             # Minimum IC for factor inclusion
+
+# ============================================================================
+# CACHE MANAGEMENT
+# ============================================================================
+cache:
+  enabled: true
+  freshness_days: 30               # Reuse pools if newer than 30 days
+  check_universe_consistency: true # Validate universe hasn't changed
+  cache_dir: "output/cache"
+  skip_training_if_cached: false   # Manual override to skip training
+
+  # Cache file patterns
+  pool_file_pattern: "pool_{window}.json"
+  ensemble_file_pattern: "ensemble_pool_{validation_start}.json"
+
+# ============================================================================
+# OUTPUT CONFIGURATION
+# ============================================================================
+output:
+  base_dir: "output/ensemble"
+
+  # Pool outputs per window
+  pool_12m: "output/ensemble/pool_12m.json"
+  pool_6m: "output/ensemble/pool_6m.json"
+  pool_3m: "output/ensemble/pool_3m.json"
+
+  # Final ensemble output
+  final_ensemble: "output/ensemble/ensemble_pool_2024Q1.json"
+
+  # Logs and reports
+  training_log: "output/ensemble/ensemble_training.log"
+  performance_report: "output/ensemble/ensemble_report_2024Q1.txt"
+
+  # Detailed metrics
+  save_detailed_metrics: true
+  metrics_file: "output/ensemble/ensemble_metrics_2024Q1.json"
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  console_output: true
+  file_output: true

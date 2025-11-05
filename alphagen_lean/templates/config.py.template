@@ -1,0 +1,40 @@
+"""
+AlphaGen 因子策略配置
+自动生成 - Window {window_idx}: {deploy_month}
+"""
+
+# 股票池
+SYMBOLS = {symbols}
+
+# AlphaGen 因子表达式和权重
+# Train period: {train_start} to {train_end}
+# Deploy period: {deploy_start} to {deploy_end}
+# Train IC: {train_ic:.4f}
+# Deploy IC: {deploy_ic:.4f}
+FACTOR_EXPRESSIONS = {expressions}
+
+FACTOR_WEIGHTS = {weights}
+
+# 数据参数
+DATA_RESOLUTION = "Minute"
+LOOKBACK_DAYS = {lookback_days}
+
+# 调仓策略
+REBALANCE_FREQUENCY = "MONTHLY"  # 每月第一个交易日调仓
+
+# 组合参数
+LONG_SHORT_MODE = {long_short_mode}  # {long_short_comment}
+TOP_QUANTILE = {top_quantile}      # 做多前{top_pct}%
+BOTTOM_QUANTILE = {bottom_quantile}   # 做空后{bottom_pct}%（long only模式下不使用）
+MAX_POSITION_SIZE = {max_position_size}
+MAX_POSITION_COUNT = {max_position_count}
+
+# 风控
+MIN_DOLLAR_VOLUME = {min_dollar_volume}
+MIN_PRICE = {min_price}
+
+# 回测参数
+START_DATE = ({start_year}, {start_month}, {start_day})
+END_DATE = ({end_year}, {end_month}, {end_day})
+INITIAL_CASH = {initial_cash}
+BENCHMARK = "{benchmark}"

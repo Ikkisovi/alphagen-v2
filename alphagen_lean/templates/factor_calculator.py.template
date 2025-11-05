@@ -1,0 +1,159 @@
+"""
+AlphaGen 因子计算器
+自动生成 - Window {window_idx}: {deploy_month}
+
+关键步骤：
+1. 分钟数据聚合为日度
+2. 计算原始因子值
+3. 横截面标准化（在所有股票间）
+4. 加权组合
+"""
+
+import numpy as np
+from config import FACTOR_WEIGHTS
+
+class FactorCalculator:
+
+    def __init__(self, data_aggregator, algorithm=None):
+        self.data_aggregator = data_aggregator
+        self.algorithm = algorithm
+
+    def calculate_all_factors(self, symbols, debug_symbols=None):
+        """
+        计算所有股票的最终因子值
+
+        流程：
+        1. 计算所有股票的{n_factors}个子因子原始值
+        2. 对每个子因子进行横截面标准化
+        3. 加权组合得到最终因子
+        """
+        # Step 1: 计算原始因子值
+        raw_factors = {{}}  # {{symbol: [f1, f2, ..., f{n_factors}]}}
+
+        for symbol in symbols:
+            if not self.data_aggregator.has_sufficient_data(symbol, 45):
+                continue
+
+            try:
+                hist = self._get_history(symbol)
+                raw_factors[symbol] = self._compute_raw_factors(hist)
+            except Exception as e:
+                continue
+
+        if len(raw_factors) < 5:
+            return {{s: np.nan for s in symbols}}
+
+        # Step 2: 横截面标准化
+        normalized = self._cross_sectional_normalize(raw_factors)
+
+        # Step 3: 加权组合
+        final_factors = {{}}
+        for symbol in symbols:
+            if symbol in normalized:
+                final_factors[symbol] = np.dot(FACTOR_WEIGHTS, normalized[symbol])
+
+                # Debug output for specific symbols
+                if debug_symbols and symbol in debug_symbols:
+                    self._debug_factors(symbol, raw_factors[symbol], normalized[symbol], final_factors[symbol])
+            else:
+                final_factors[symbol] = np.nan
+
+        return final_factors
+
+    def _get_history(self, symbol):
+        """获取历史数据"""
+        return {{
+            'open': self.data_aggregator.get_daily_history(symbol, 'open'),
+            'high': self.data_aggregator.get_daily_history(symbol, 'high'),
+            'low': self.data_aggregator.get_daily_history(symbol, 'low'),
+            'close': self.data_aggregator.get_daily_history(symbol, 'close'),
+            'volume': self.data_aggregator.get_daily_history(symbol, 'volume'),
+            'vwap': self.data_aggregator.get_daily_history(symbol, 'vwap'),
+        }}
+
+    def _compute_raw_factors(self, hist):
+        """计算{n_factors}个子因子的原始值"""
+        return [
+{factor_calls}
+        ]
+
+    def _cross_sectional_normalize(self, raw_factors):
+        """
+        横截面标准化：关键步骤！
+
+        对每个子因子，在所有股票间进行标准化：
+        z_i = (x_i - mean(x)) / std(x)
+
+        这样可以：
+        1. 消除不同量纲的影响
+        2. 确保所有因子在同一尺度
+        3. 与 AlphaGen 训练时的处理一致
+        """
+        symbols = list(raw_factors.keys())
+        n_stocks = len(symbols)
+        n_factors = {n_factors}
+
+        # 转为矩阵：(n_stocks, n_factors)
+        raw_matrix = np.array([raw_factors[s] for s in symbols])
+        normalized_matrix = np.zeros_like(raw_matrix)
+
+        # 对每列（每个子因子）标准化
+        for j in range(n_factors):
+            values = raw_matrix[:, j]
+
+            # 过滤异常值
+            valid_mask = np.isfinite(values)
+            if valid_mask.sum() < 3:
+                normalized_matrix[:, j] = 0
+                continue
+
+            valid_values = values[valid_mask]
+            mean = np.mean(valid_values)
+            std = np.std(valid_values)
+
+            if std < 1e-8:
+                # 标准差太小，说明值几乎相同
+                normalized_matrix[:, j] = 0
+            else:
+                # 标准化
+                normalized_matrix[valid_mask, j] = (values[valid_mask] - mean) / std
+                normalized_matrix[~valid_mask, j] = 0
+
+        # 转回字典
+        return {{s: normalized_matrix[i, :] for i, s in enumerate(symbols)}}
+
+    def _debug_factors(self, symbol, raw_factors, normalized_factors, final_value):
+        """打印详细的因子分解用于调试"""
+        if not self.algorithm:
+            return
+
+        self.algorithm.Debug(f"\\n{{'='*60}}")
+        self.algorithm.Debug(f"Factor breakdown for {{symbol}}:")
+        self.algorithm.Debug(f"{{'='*60}}")
+
+        factor_names = [
+{factor_names}
+        ]
+
+        self.algorithm.Debug(f"\\nSub-factors (Raw -> Z-score Normalized):")
+        for i, (raw, norm, w, name) in enumerate(zip(raw_factors, normalized_factors, FACTOR_WEIGHTS, factor_names), 1):
+            contribution = w * norm
+            self.algorithm.Debug(f"  {{name:40s}}: {{raw:12.2f}} -> {{norm:7.3f}} * {{w:7.4f}} = {{contribution:8.4f}}")
+
+        self.algorithm.Debug(f"\\nFinal factor value: {{final_value:.4f}}")
+        self.algorithm.Debug(f"{{'='*60}}\\n")
+
+    # ==================== {n_factors}个子因子（返回原始值）====================
+
+{factor_functions}
+
+    def _rolling_mad(self, data, window):
+        """滚动 Mean Absolute Deviation"""
+        result = []
+        for i in range(len(data)):
+            start = max(0, i - window + 1)
+            window_data = data[start:i+1]
+            median = np.median(window_data)
+            mad = np.mean(np.abs(window_data - median))
+            result.append(mad)
+        return np.array(result)

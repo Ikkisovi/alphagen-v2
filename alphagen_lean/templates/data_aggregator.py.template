@@ -1,0 +1,94 @@
+"""
+分钟数据聚合为日度 OHLCV + VWAP
+"""
+
+import numpy as np
+from collections import defaultdict, deque
+from datetime import timedelta
+
+class MinuteDataAggregator:
+    
+    def __init__(self, symbols, lookback_days=60):
+        self.symbols = symbols
+        self.lookback_days = lookback_days
+        
+        # 分钟数据缓存
+        self.minute_cache = {s: defaultdict(list) for s in symbols}
+        
+        # 日度数据
+        self.daily_bars = {s: deque(maxlen=lookback_days) for s in symbols}
+        
+        self.current_date = None
+        
+    def update(self, symbol, time, bar):
+        if symbol not in self.minute_cache:
+            return
+        
+        date = time.date()
+        
+        # 日期切换，聚合前一天
+        if self.current_date is not None and date != self.current_date:
+            self._aggregate_day(self.current_date)
+        
+        self.current_date = date
+        
+        # 添加分钟bar
+        self.minute_cache[symbol][date].append({
+            'open': bar.Open,
+            'high': bar.High,
+            'low': bar.Low,
+            'close': bar.Close,
+            'volume': bar.Volume
+        })
+    
+    def _aggregate_day(self, date):
+        for symbol in self.symbols:
+            if date not in self.minute_cache[symbol]:
+                continue
+            
+            bars = self.minute_cache[symbol][date]
+            if len(bars) == 0:
+                continue
+
+            # 计算总成交量
+            total_volume = sum(b['volume'] for b in bars)
+
+            # 如果总成交量为0，跳过该日数据
+            if total_volume == 0:
+                continue
+
+            # 聚合为日度
+            daily = {
+                'date': date,
+                'open': bars[0]['open'],
+                'high': max(b['high'] for b in bars),
+                'low': min(b['low'] for b in bars),
+                'close': bars[-1]['close'],
+                'volume': total_volume,
+                'vwap': sum(b['close'] * b['volume'] for b in bars) / total_volume
+            }
+            
+            self.daily_bars[symbol].append(daily)
+        
+        # 清理旧数据
+        cutoff = date - timedelta(days=5)
+        for symbol in self.symbols:
+            old_dates = [d for d in self.minute_cache[symbol].keys() if d < cutoff]
+            for d in old_dates:
+                del self.minute_cache[symbol][d]
+    
+    def get_daily_history(self, symbol, field, days=None):
+        if symbol not in self.daily_bars:
+            return np.array([])
+        
+        bars = list(self.daily_bars[symbol])
+        if days:
+            bars = bars[-days:]
+        
+        if len(bars) == 0:
+            return np.array([])
+        
+        return np.array([b[field] for b in bars])
+    
+    def has_sufficient_data(self, symbol, min_days=40):
+        return len(self.daily_bars.get(symbol, [])) >= min_days

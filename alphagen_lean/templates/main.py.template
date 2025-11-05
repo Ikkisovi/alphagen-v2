@@ -1,0 +1,194 @@
+from AlgorithmImports import *
+from data_aggregator import MinuteDataAggregator
+from factor_calculator import FactorCalculator
+from portfolio_constructor import PortfolioConstructor
+from config import *
+
+class AlphaGenStrategy(QCAlgorithm):
+    """
+    AlphaGen 因子策略
+    - 分钟数据 → 日度聚合
+    - 每月调仓（基于20日持有期的优异表现）
+    """
+    
+    def Initialize(self):
+        self.SetStartDate(*START_DATE)
+        self.SetEndDate(*END_DATE)
+        self.SetCash(INITIAL_CASH)
+        self.SetBenchmark(BENCHMARK)
+        
+        # 添加股票
+        self.equity_symbols = {}
+        for ticker in SYMBOLS:
+            try:
+                symbol = self.AddEquity(ticker, Resolution.Minute).Symbol
+                self.equity_symbols[ticker] = symbol
+            except:
+                self.Debug(f"Failed: {ticker}")
+        
+        self.Debug(f"Symbols: {len(self.equity_symbols)}")
+        
+        # 初始化模块
+        self.data_aggregator = MinuteDataAggregator(
+            list(self.equity_symbols.keys()), LOOKBACK_DAYS
+        )
+        self.factor_calculator = FactorCalculator(self.data_aggregator, algorithm=self)
+        self.portfolio_constructor = PortfolioConstructor(self)
+        
+        # 预热（减少到50天以便更早开始交易）
+        self.SetWarmUp(timedelta(days=50))
+
+        # 调仓：每月第一个交易日
+        self.Schedule.On(
+            self.DateRules.MonthStart(),
+            self.TimeRules.AfterMarketOpen(list(self.equity_symbols.values())[0], 30),
+            self.Rebalance
+        )
+
+        # 添加预热结束后的首次调仓
+        self.first_rebalance_done = False
+
+        self.rebalance_count = 0
+    
+    def OnData(self, data):
+        # 更新分钟数据
+        for ticker, symbol in self.equity_symbols.items():
+            if data.Bars.ContainsKey(symbol):
+                self.data_aggregator.update(ticker, self.Time, data.Bars[symbol])
+
+        # 预热结束后立即执行首次调仓
+        if not self.IsWarmingUp and not self.first_rebalance_done:
+            self.Debug(f"{'='*60}")
+            self.Debug(f"Warmup completed! Executing first rebalance at {self.Time}")
+            self.Debug(f"{'='*60}")
+            self.first_rebalance_done = True
+            self.Rebalance()
+    
+    def Rebalance(self):
+        if self.IsWarmingUp:
+            return
+        
+        self.rebalance_count += 1
+        self.Debug(f"\n{'='*60}")
+        self.Debug(f"Rebalance #{self.rebalance_count} @ {self.Time}")
+        
+        # 计算因子 (在第一次调仓时显示详细的因子分解)
+        debug_symbols = ['MU', 'WLDN', 'CCL'] if self.rebalance_count == 1 else None
+        factors = self.factor_calculator.calculate_all_factors(
+            list(self.equity_symbols.keys()),
+            debug_symbols=debug_symbols
+        )
+
+        valid = {k: v for k, v in factors.items() if not np.isnan(v)}
+        self.Debug(f"Valid: {len(valid)}/{len(factors)}")
+
+        # 显示前5个和后5个因子值(排序后)
+        if len(valid) > 0:
+            sorted_factors = sorted(valid.items(), key=lambda x: x[1], reverse=True)
+            top5 = sorted_factors[:5]
+            bottom5 = sorted_factors[-5:]
+            self.Debug(f"Top 5 factors: {[(s, f'{v:.4f}') for s, v in top5]}")
+            self.Debug(f"Bottom 5 factors: {[(s, f'{v:.4f}') for s, v in bottom5]}")
+
+        if len(valid) < 10:
+            return
+        
+        # 构建组合
+        securities = {t: self.Securities[s] for t, s in self.equity_symbols.items()}
+        weights = self.portfolio_constructor.construct_portfolio(factors, securities)
+        
+        self.Debug(f"Positions: {len(weights)}")
+        
+        # 执行
+        for ticker, symbol in self.equity_symbols.items():
+            if ticker not in weights and self.Portfolio[symbol].Invested:
+                self.Liquidate(symbol)
+        
+        for ticker, weight in weights.items():
+            self.SetHoldings(self.equity_symbols[ticker], weight)
+        
+        # 日志
+        self._log(factors)
+    
+    def _log(self, factors):
+        positions = []
+        for ticker, symbol in self.equity_symbols.items():
+            h = self.Portfolio[symbol]
+            if h.Invested:
+                positions.append({
+                    'ticker': ticker,
+                    'weight': h.HoldingsValue / self.Portfolio.TotalPortfolioValue,
+                    'factor': factors.get(ticker, np.nan),
+                    'pnl': h.UnrealizedProfit,
+                    'qty': h.Quantity
+                })
+        
+        longs = [p for p in positions if p['qty'] > 0]
+        shorts = [p for p in positions if p['qty'] < 0]
+        
+        longs.sort(key=lambda x: x['weight'], reverse=True)
+        shorts.sort(key=lambda x: x['weight'])
+        
+        self.Debug(f"\nLongs ({len(longs)}):")
+        for p in longs[:5]:
+            self.Debug(f"  {p['ticker']:6s} {p['weight']:6.2%} F={p['factor']:8.4f} P&L=${p['pnl']:8.2f}")
+        
+        self.Debug(f"\nShorts ({len(shorts)}):")
+        for p in shorts[:5]:
+            self.Debug(f"  {p['ticker']:6s} {p['weight']:6.2%} F={p['factor']:8.4f} P&L=${p['pnl']:8.2f}")
+        
+        self.Debug(f"\nTotal P&L: ${sum(p['pnl'] for p in positions):.2f}")
+    
+    def OnEndOfAlgorithm(self):
+        ret = (self.Portfolio.TotalPortfolioValue / INITIAL_CASH - 1) * 100
+        self.Debug(f"\n{'='*60}")
+        self.Debug(f"BACKTEST SUMMARY")
+        self.Debug(f"{'='*60}")
+        self.Debug(f"Total Return: {ret:.2f}%")
+        self.Debug(f"Rebalances: {self.rebalance_count}")
+        self.Debug(f"Final Portfolio Value: ${self.Portfolio.TotalPortfolioValue:,.2f}")
+        self.Debug(f"Cash: ${self.Portfolio.Cash:,.2f}")
+
+        # 显示最终持仓
+        self.Debug(f"\n{'='*60}")
+        self.Debug(f"FINAL HOLDINGS")
+        self.Debug(f"{'='*60}")
+
+        holdings = []
+        for ticker, symbol in self.equity_symbols.items():
+            h = self.Portfolio[symbol]
+            if h.Invested:
+                holdings.append({
+                    'ticker': ticker,
+                    'quantity': h.Quantity,
+                    'price': h.Price,
+                    'value': h.HoldingsValue,
+                    'weight': h.HoldingsValue / self.Portfolio.TotalPortfolioValue,
+                    'cost': h.AveragePrice,
+                    'pnl': h.UnrealizedProfit,
+                    'pnl_pct': (h.Price / h.AveragePrice - 1) * 100 if h.AveragePrice > 0 else 0
+                })
+
+        if len(holdings) > 0:
+            # 按持仓权重排序
+            holdings.sort(key=lambda x: abs(x['weight']), reverse=True)
+
+            self.Debug(f"Total Positions: {len(holdings)}")
+            self.Debug(f"\n{'Ticker':<8} {'Qty':>8} {'Price':>10} {'Value':>12} {'Weight':>8} {'P&L':>12} {'P&L%':>8}")
+            self.Debug(f"{'-'*80}")
+
+            for h in holdings:
+                self.Debug(
+                    f"{h['ticker']:<8} {h['quantity']:>8.0f} "
+                    f"${h['price']:>9.2f} ${h['value']:>11.2f} "
+                    f"{h['weight']:>7.2%} ${h['pnl']:>11.2f} "
+                    f"{h['pnl_pct']:>7.2f}%"
+                )
+
+            total_pnl = sum(h['pnl'] for h in holdings)
+            self.Debug(f"{'-'*80}")
+            self.Debug(f"{'Total P&L:':<52} ${total_pnl:>11.2f}")
+        else:
+            self.Debug(f"No positions held at end of backtest")
+
+        self.Debug(f"\n{'='*60}")

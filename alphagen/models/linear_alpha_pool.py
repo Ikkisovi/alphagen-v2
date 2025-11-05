@@ -115,7 +115,15 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
                 ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=None)
             except (OutOfDataRangeError, TypeError):
                 continue
-            assert ic_ret is not None and ic_mut is not None
+            if ic_ret is None or ic_mut is None:
+                self._failure_cache.add(str(expr))
+                continue
+            if not math.isfinite(ic_ret):
+                self._failure_cache.add(str(expr))
+                continue
+            if ic_mut and (not np.isfinite(np.array(ic_mut)).all()):
+                self._failure_cache.add(str(expr))
+                continue
             self._add_factor(expr, ic_ret, ic_mut)
             added.append(expr)
             assert self.size <= self.capacity
@@ -402,3 +410,59 @@ class MeanStdAlphaPool(LinearAlphaPool):
                 break
     
         return best_weights.cpu().detach().numpy()
+
+class CustomRewardAlphaPool(MeanStdAlphaPool):
+    def __init__(
+        self,
+        capacity: int,
+        calculator: TensorAlphaCalculator,
+        ic_lower_bound: Optional[float] = None,
+        l1_alpha: float = 5e-3,
+        lcb_beta: Optional[float] = None,
+        turnover_penalty_coeff: float = 0.1, # New parameter
+        device: torch.device = torch.device("cpu")
+    ):
+        super().__init__(capacity, calculator, ic_lower_bound, l1_alpha, lcb_beta, device)
+        self.turnover_penalty_coeff = turnover_penalty_coeff
+
+    def _calc_main_objective(self) -> float:
+        if self.size == 0:
+            return 0.0
+
+        alpha_values = torch.stack(self._extra_info[:self.size])
+        weights = torch.tensor(self.weights, device=self.device)
+        
+        # Calculate Ensemble IC and ICIR from weighted alpha
+        target_value = self.calculator.target
+        weighted_alpha = (weights[:, None, None] * alpha_values).sum(dim=0)
+        ics = batch_pearsonr(weighted_alpha, target_value)
+        
+        ensemble_ic = ics.mean().item()
+        if math.isnan(ensemble_ic):
+            ensemble_ic = 0.0
+
+        ic_mean = ics.mean()
+        ic_std = ics.std()
+        if torch.isnan(ic_std) or ic_std.item() < 1e-6:
+            ensemble_icir = 0.0
+        else:
+            ensemble_icir = (ic_mean / ic_std).item()
+            if not math.isfinite(ensemble_icir):
+                ensemble_icir = 0.0
+
+        # Calculate Turnover Penalty for the ensemble
+        turnover_penalty = 0.0
+        if self.turnover_penalty_coeff > 0 and weighted_alpha.shape[0] > 1:
+            # Calculate day-over-day correlation for the weighted alpha values
+            valid_mask = ~torch.isnan(weighted_alpha)
+            valid_values = torch.where(valid_mask, weighted_alpha, torch.tensor(0.0, device=self.device))
+
+            daily_corr = batch_pearsonr(valid_values[:-1], valid_values[1:]).mean().item()
+            if math.isfinite(daily_corr):
+                # Turnover is 1 - correlation.
+                turnover = 1.0 - daily_corr
+                turnover_penalty = self.turnover_penalty_coeff * turnover
+
+        # Combine them
+        final_objective = ensemble_ic + ensemble_icir - turnover_penalty
+        return final_objective

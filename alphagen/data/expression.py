@@ -7,6 +7,22 @@ from alphagen.utils.maybe import Maybe, some, none
 from alphagen_qlib.stock_data import StockData, FeatureType
 
 
+FUNDAMENTAL_FEATURES = {
+    FeatureType.PE_RATIO,
+    FeatureType.PB_RATIO,
+    FeatureType.PS_RATIO,
+    FeatureType.EV_TO_EBITDA,
+    FeatureType.EV_TO_REVENUE,
+    FeatureType.EV_TO_FCF,
+    FeatureType.EARNINGS_YIELD,
+    FeatureType.FCF_YIELD,
+    FeatureType.SALES_YIELD,
+    FeatureType.FORWARD_PE_RATIO,
+    FeatureType.SHARES_OUTSTANDING,
+    FeatureType.MARKET_CAP,
+}
+
+
 _ExprOrFloat = Union["Expression", float]
 _DTimeOrInt = Union["DeltaTime", int]
 
@@ -39,6 +55,10 @@ class Expression(metaclass=ABCMeta):
     @abstractmethod
     def is_featured(self) -> bool: ...
 
+    @property
+    def has_temporal_variation(self) -> bool:
+        return self.is_featured
+
 
 class Feature(Expression):
     def __init__(self, feature: FeatureType) -> None:
@@ -51,12 +71,20 @@ class Feature(Expression):
             raise OutOfDataRangeError()
         start = period.start + data.max_backtrack_days
         stop = period.stop + data.max_backtrack_days + data.n_days - 1
-        return data.data[start:stop, int(self._feature), :]
+        try:
+            feature_idx = data._features.index(self._feature)
+        except ValueError:
+            raise ValueError(f"Feature {self._feature.name} not found in StockData features")
+        return data.data[start:stop, feature_idx, :]
 
     def __str__(self) -> str: return '$' + self._feature.name.lower()
 
     @property
     def is_featured(self): return True
+
+    @property
+    def has_temporal_variation(self):
+        return self._feature not in FUNDAMENTAL_FEATURES
 
 
 class Constant(Expression):
@@ -79,6 +107,9 @@ class Constant(Expression):
     @property
     def is_featured(self): return False
 
+    @property
+    def has_temporal_variation(self): return False
+
 
 class DeltaTime(Expression):
     # This is not something that should be in the final expression
@@ -93,6 +124,9 @@ class DeltaTime(Expression):
 
     @property
     def is_featured(self): return False
+
+    @property
+    def has_temporal_variation(self): return False
 
 
 def _into_expr(value: _ExprOrFloat) -> "Expression":
@@ -185,6 +219,9 @@ class UnaryOperator(Operator):
     @property
     def is_featured(self): return self._operand.is_featured
 
+    @property
+    def has_temporal_variation(self): return self._operand.has_temporal_variation
+
 
 class BinaryOperator(Operator):
     def __init__(self, lhs: _ExprOrFloat, rhs: _ExprOrFloat) -> None:
@@ -214,6 +251,11 @@ class BinaryOperator(Operator):
 
     @property
     def is_featured(self): return self._lhs.is_featured or self._rhs.is_featured
+
+    @property
+    def has_temporal_variation(self):
+        return (self._lhs.has_temporal_variation or
+                self._rhs.has_temporal_variation)
 
 
 class RollingOperator(Operator):
@@ -253,6 +295,9 @@ class RollingOperator(Operator):
 
     @property
     def is_featured(self): return self._operand.is_featured
+
+    @property
+    def has_temporal_variation(self): return self._operand.has_temporal_variation
 
 
 class PairRollingOperator(Operator):
@@ -298,6 +343,11 @@ class PairRollingOperator(Operator):
 
     @property
     def is_featured(self): return self._lhs.is_featured or self._rhs.is_featured
+
+    @property
+    def has_temporal_variation(self):
+        return (self._lhs.has_temporal_variation or
+                self._rhs.has_temporal_variation)
 
 
 # Operator implementations
@@ -464,6 +514,69 @@ class EMA(RollingOperator):
         return (weights * operand).sum(dim=-1)
 
 
+class DEMA(RollingOperator):
+    """Double Exponential Moving Average: DEMA = 2*EMA - EMA(EMA)"""
+    def _apply(self, operand: Tensor) -> Tensor:
+        n = operand.shape[-1]
+        alpha = 1 - 2 / (1 + n)
+        power = torch.arange(n, 0, -1, dtype=operand.dtype, device=operand.device)
+        weights = alpha ** power
+        weights /= weights.sum()
+
+        # First EMA
+        ema1 = (weights * operand).sum(dim=-1, keepdim=True)
+
+        # EMA of EMA (approximation using same weights)
+        ema_values = ema1.expand_as(operand)
+        ema2 = (weights * ema_values).sum(dim=-1)
+
+        return 2 * ema1.squeeze(-1) - ema2
+
+
+class TEMA(RollingOperator):
+    """Triple Exponential Moving Average: TEMA = 3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))"""
+    def _apply(self, operand: Tensor) -> Tensor:
+        n = operand.shape[-1]
+        alpha = 1 - 2 / (1 + n)
+        power = torch.arange(n, 0, -1, dtype=operand.dtype, device=operand.device)
+        weights = alpha ** power
+        weights /= weights.sum()
+
+        # First EMA
+        ema1 = (weights * operand).sum(dim=-1, keepdim=True)
+
+        # Second EMA
+        ema_values = ema1.expand_as(operand)
+        ema2 = (weights * ema_values).sum(dim=-1, keepdim=True)
+
+        # Third EMA
+        ema2_expanded = ema2.expand_as(operand)
+        ema3 = (weights * ema2_expanded).sum(dim=-1)
+
+        return 3 * ema1.squeeze(-1) - 3 * ema2.squeeze(-1) + ema3
+
+
+class RSI(RollingOperator):
+    """Relative Strength Index"""
+    def _apply(self, operand: Tensor) -> Tensor:
+        # Calculate price changes
+        deltas = operand[..., 1:] - operand[..., :-1]
+
+        # Separate gains and losses
+        gains = torch.where(deltas > 0, deltas, torch.zeros_like(deltas))
+        losses = torch.where(deltas < 0, -deltas, torch.zeros_like(deltas))
+
+        # Average gains and losses
+        avg_gain = gains.mean(dim=-1)
+        avg_loss = losses.mean(dim=-1)
+
+        # Calculate RS and RSI
+        rs = avg_gain / (avg_loss + 1e-8)
+        rsi = 100 - (100 / (1 + rs))
+
+        return rsi
+
+
 class Cov(PairRollingOperator):
     def _apply(self, lhs: Tensor, rhs: Tensor) -> Tensor:
         n = lhs.shape[-1]
@@ -491,7 +604,7 @@ Operators: List[Type[Operator]] = [
     Add, Sub, Mul, Div, Pow, Greater, Less,
     # Rolling
     Ref, Mean, Sum, Std, Var, Skew, Kurt, Max, Min,
-    Med, Mad, Rank, Delta, WMA, EMA,
+    Med, Mad, Rank, Delta, WMA, EMA, DEMA, TEMA, RSI,
     # Pair rolling
     Cov, Corr
 ]

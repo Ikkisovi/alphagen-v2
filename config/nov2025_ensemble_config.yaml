@@ -1,0 +1,161 @@
+# Ensemble Alpha Mining Configuration for November 2025 Prediction
+# Training on data up to Oct 2025, predicting Nov 2025
+
+# ============================================================================
+# TIME WINDOWS - Configured for November 2025 Prediction
+# ============================================================================
+time_windows:
+  # Training windows (ending Oct 2025)
+  train_12m:
+    name: "12m"
+    start_date: "2024-11-01"  # 12 months back from Oct 2025
+    end_date: "2025-10-31"
+    description: "12-month historical window for Nov 2025 prediction"
+
+  train_6m:
+    name: "6m"
+    start_date: "2025-05-01"  # 6 months back from Oct 2025
+    end_date: "2025-10-31"
+    description: "6-month medium-term window for Nov 2025 prediction"
+
+  train_3m:
+    name: "3m"
+    start_date: "2025-08-01"  # 3 months back from Oct 2025
+    end_date: "2025-10-31"
+    description: "3-month short-term window for Nov 2025 prediction"
+
+  # Validation/prediction window (November 2025)
+  validation:
+    start_date: "2025-07-01"  # Use recent data for validation
+    end_date: "2025-10-31"
+    description: "Recent period for ensemble optimization (predicting Nov 2025)"
+
+# ============================================================================
+# UNIVERSE CONFIGURATION
+# ============================================================================
+universe:
+  base_instrument: "csi300"
+
+  # Additional stocks from our merged dataset
+  additional_stocks:
+    - "AAPL"
+    - "GOOGL"
+    - "AMZN"
+    - "NVDA"
+
+  fingerprint_file: "output/nov2025_universe_fingerprint.json"
+
+# ============================================================================
+# TRAINING CONFIGURATION (Test Mode - Reduced Episodes)
+# ============================================================================
+training:
+  # Dual-stage training approach
+  stage1_technical:
+    enabled: true
+    max_episodes: 100      # Reduced for quick test
+    min_episodes: 50
+    early_stopping_patience: 15
+    target_candidates: 40   # Reduced for test
+    use_fundamentals: false
+
+  stage2_fundamentals:
+    enabled: true
+    max_episodes: 100      # Reduced for quick test
+    min_episodes: 50
+    early_stopping_patience: 15
+    top_quartile_only: true
+    target_factors_per_window: 15  # Reduced for test
+    use_fundamentals: true
+
+  # Pool configuration per window
+  pool_capacity_per_window: 20   # Reduced for test
+
+  # PPO/RL hyperparameters
+  ppo:
+    learning_rate: 0.0001
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_epsilon: 0.2
+    entropy_coef: 0.01
+    value_loss_coef: 0.5
+
+  # Device configuration
+  device: "cuda:0"
+
+# ============================================================================
+# FUNDAMENTAL FEATURES
+# ============================================================================
+fundamental_features:
+  # Valuation ratios
+  - "PERatio"
+  - "PBRatio"
+  - "PSRatio"
+  - "EVToEBITDA"
+  - "EVToRevenue"
+  - "EVToFCF"
+
+  # Yield metrics
+  - "EarningYield"
+  - "FCFYield"
+  - "SalesYield"
+
+# ============================================================================
+# ENSEMBLE CONFIGURATION
+# ============================================================================
+ensemble:
+  final_capacity: 30               # Reduced for test
+  auto_prune_weak_factors: true
+
+  optimizer:
+    learning_rate: 0.0005
+    max_steps: 10000
+    tolerance: 500
+    l1_alpha: 0.005
+
+  cross_validation:
+    enabled: true
+    n_folds: 3                     # Reduced for test
+    shrinkage_factor: 0.9
+
+  ic_lower_bound: 0.01
+
+# ============================================================================
+# CACHE MANAGEMENT
+# ============================================================================
+cache:
+  enabled: false                    # Disable cache for fresh test
+  freshness_days: 30
+  check_universe_consistency: true
+  cache_dir: "output/cache_nov2025"
+  skip_training_if_cached: false
+
+# ============================================================================
+# OUTPUT CONFIGURATION - November 2025 Prediction
+# ============================================================================
+output:
+  base_dir: "output/nov2025_ensemble"
+
+  # Pool outputs per window
+  pool_12m: "output/nov2025_ensemble/pool_12m_nov2025.json"
+  pool_6m: "output/nov2025_ensemble/pool_6m_nov2025.json"
+  pool_3m: "output/nov2025_ensemble/pool_3m_nov2025.json"
+
+  # Final ensemble output for November 2025 prediction
+  final_ensemble: "output/nov2025_ensemble/ensemble_pool_nov2025.json"
+
+  # Logs and reports
+  training_log: "output/nov2025_ensemble/training_nov2025.log"
+  performance_report: "output/nov2025_ensemble/report_nov2025.txt"
+
+  # Detailed metrics
+  save_detailed_metrics: true
+  metrics_file: "output/nov2025_ensemble/metrics_nov2025.json"
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  console_output: true
+  file_output: true

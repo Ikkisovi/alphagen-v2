@@ -8,7 +8,7 @@ GenericOperator = namedtuple('GenericOperator', ['name', 'function', 'arity'])
 
 unary_ops = [Abs, Log]
 binary_ops = [Add, Sub, Mul, Div, Greater, Less]
-rolling_ops = [Ref, Mean, Sum, Std, Var, Max, Min, Med, Mad, Delta, WMA, EMA]
+rolling_ops = [Ref, Mean, Sum, Std, Var, Max, Min, Med, Mad, Delta, WMA, EMA, DEMA, TEMA, RSI]
 rolling_binary_ops = [Cov, Corr]
 
 

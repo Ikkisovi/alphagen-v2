@@ -1,4 +1,4 @@
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Sequence
 import gymnasium as gym
 import numpy as np
 
@@ -26,7 +26,8 @@ class AlphaEnvWrapper(gym.Wrapper):
     def __init__(
         self,
         env: AlphaEnvCore,
-        subexprs: Optional[List[Expression]] = None
+        subexprs: Optional[List[Expression]] = None,
+        allowed_features: Optional[Sequence[FeatureType]] = None
     ):
         super().__init__(env)
         self.subexprs = subexprs or []
@@ -37,6 +38,15 @@ class AlphaEnvWrapper(gym.Wrapper):
             shape=(MAX_EXPR_LENGTH, ),
             dtype=np.uint8
         )
+        if allowed_features is None:
+            self._feature_mask = np.ones(SIZE_FEATURE, dtype=bool)
+        else:
+            mask = np.zeros(SIZE_FEATURE, dtype=bool)
+            for feature in allowed_features:
+                mask[int(feature)] = True
+            if not mask.any():
+                raise ValueError("allowed_features must contain at least one feature")
+            self._feature_mask = mask
 
     def reset(self, **kwargs) -> Tuple[np.ndarray, dict]:
         self.counter = 0
@@ -67,7 +77,7 @@ class AlphaEnvWrapper(gym.Wrapper):
                 res[i] = True
         offset += SIZE_OP
         if valid['select'][1]:  # Features
-            res[offset:offset + SIZE_FEATURE] = True
+            res[offset:offset + SIZE_FEATURE] = self._feature_mask
         offset += SIZE_FEATURE
         if valid['select'][2]:  # Constants
             res[offset:offset + SIZE_CONSTANT] = True
@@ -105,5 +115,14 @@ class AlphaEnvWrapper(gym.Wrapper):
         assert False
 
 
-def AlphaEnv(pool: AlphaPoolBase, subexprs: Optional[List[Expression]] = None, **kwargs):
-    return AlphaEnvWrapper(AlphaEnvCore(pool=pool, **kwargs), subexprs=subexprs)
+def AlphaEnv(
+    pool: AlphaPoolBase,
+    subexprs: Optional[List[Expression]] = None,
+    allowed_features: Optional[Sequence[FeatureType]] = None,
+    **kwargs
+):
+    return AlphaEnvWrapper(
+        AlphaEnvCore(pool=pool, **kwargs),
+        subexprs=subexprs,
+        allowed_features=allowed_features
+    )

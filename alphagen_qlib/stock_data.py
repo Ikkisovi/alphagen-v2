@@ -6,12 +6,54 @@ import torch
 
 
 class FeatureType(IntEnum):
+    # Price/Volume features
     OPEN = 0
     CLOSE = 1
     HIGH = 2
     LOW = 3
     VOLUME = 4
     VWAP = 5
+
+    # Valuation ratios
+    PE_RATIO = 6
+    PB_RATIO = 7
+    PS_RATIO = 8
+    EV_TO_EBITDA = 9
+    EV_TO_REVENUE = 10
+    EV_TO_FCF = 11
+
+    # Yield metrics
+    EARNINGS_YIELD = 12
+    FCF_YIELD = 13
+    SALES_YIELD = 14
+    DIVIDEND_YIELD = 15
+
+    # Forward-looking
+    FORWARD_PE_RATIO = 16
+
+    # Market metrics
+    SHARES_OUTSTANDING = 17
+    MARKET_CAP = 18
+    TURNOVER = 19
+
+    # Growth metrics
+    REVENUE_GROWTH = 20
+    EARNINGS_GROWTH = 21
+    BOOK_VALUE_GROWTH = 22
+
+    # Financial health / Leverage
+    DEBT_TO_ASSETS = 23
+    DEBT_TO_EQUITY = 24
+    CURRENT_RATIO = 25
+    QUICK_RATIO = 26
+
+    # Profitability
+    ROE = 27  # Return on Equity
+    ROA = 28  # Return on Assets
+    ROIC = 29  # Return on Invested Capital
+    GROSS_MARGIN = 30
+    OPERATING_MARGIN = 31
+    NET_MARGIN = 32
 
 
 _DEFAULT_QLIB_DATA_PATH = "~/.qlib/qlib_data/cn_data"
@@ -89,7 +131,7 @@ class StockData:
         "Get a subview of the data given a date slice or an index slice."
         if slc.step is not None:
             raise ValueError("Only support slice with step=None")
-        if isinstance(slc.start, str):
+        if isinstance(slc.start, (str, pd.Timestamp)):
             return self[self.find_date_slice(slc.start, slc.stop)]
         start, stop = slc.start, slc.stop
         start = start if start is not None else 0
@@ -111,17 +153,27 @@ class StockData:
             preloaded_data=(data, self._dates[idx_range], self._stock_ids[remaining.tolist()])
         )
 
-    def find_date_index(self, date: str, exclusive: bool = False) -> int:
+    def find_date_index(self, date: Union[str, pd.Timestamp], exclusive: bool = False) -> int:
         ts = pd.Timestamp(date)
+        tz = getattr(self._dates, 'tz', None)
+        if ts.tzinfo is None and tz is not None:
+            ts = ts.tz_localize(tz)
         idx: int = self._dates.searchsorted(ts)  # type: ignore
         if exclusive and self._dates[idx] == ts:
             idx += 1
         idx -= self.max_backtrack_days
         if idx < 0 or idx > self.n_days:
-            raise ValueError(f"Date {date} is out of range: available [{self._start_time}, {self._end_time}]")
+            # Instead of raising an error, clamp to available date range
+            # and print a warning
+            if idx < 0:
+                print(f"  Warning: Requested date {date} is before data start {self._start_time}, using {self._start_time}")
+                return 0
+            else:
+                print(f"  Warning: Requested date {date} is after data end {self._end_time}, using {self._end_time}")
+                return self.n_days
         return idx
     
-    def find_date_slice(self, start_time: Optional[str] = None, end_time: Optional[str] = None) -> slice:
+    def find_date_slice(self, start_time: Optional[Union[str, pd.Timestamp]] = None, end_time: Optional[Union[str, pd.Timestamp]] = None) -> slice:
         """
         Find a slice of indices corresponding to the given date range.
         For the input, both ends are inclusive. The output is a normal left-closed right-open slice.

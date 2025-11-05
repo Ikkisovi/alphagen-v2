@@ -95,6 +95,7 @@ Use `python -m scripts.NAME -h` for information on the arguments.
 - `scripts/rl.py`: Main experiments of AlphaGen/HARLA
 - `scripts/llm_only.py`: Alpha generator based solely on iterative interactions with an LLM.
 - `scripts/llm_test_validity.py`: Tests on how the system prompt affects the valid alpha rate of an LLM.
+- `scripts/autogen_multi_agent.py`: Multi-agent Autogen harness pairing Gemini, Claude, and Codex for collaborative chats.
 
 ### After running
 

@@ -1,0 +1,106 @@
+"""
+多空组合构建
+"""
+
+import numpy as np
+from config import *
+
+class PortfolioConstructor:
+    
+    def __init__(self, algorithm):
+        self.algorithm = algorithm
+    
+    def construct_portfolio(self, factor_values, securities):
+        # 过滤
+        valid = self._filter(factor_values, securities)
+
+        self.algorithm.Debug(f"After filtering: {len(valid)}/{len(factor_values)} stocks passed")
+
+        if len(valid) < 10:
+            self.algorithm.Debug(f"Not enough valid stocks: {len(valid)} < 10")
+            return {}
+
+        # 排序
+        sorted_stocks = sorted(valid.items(), key=lambda x: x[1], reverse=True)
+
+        # 构建
+        if LONG_SHORT_MODE:
+            return self._long_short(sorted_stocks)
+        else:
+            return self._long_only(sorted_stocks)
+    
+    def _filter(self, factor_values, securities):
+        valid = {}
+        filter_reasons = {'nan': 0, 'not_in_sec': 0, 'price': 0, 'volume': 0, 'passed': 0}
+        sample_debug = []
+
+        for symbol, fv in factor_values.items():
+            if np.isnan(fv):
+                filter_reasons['nan'] += 1
+                continue
+            if symbol not in securities:
+                filter_reasons['not_in_sec'] += 1
+                continue
+
+            sec = securities[symbol]
+            price = sec.Price
+
+            # 使用历史日度成交量而不是当前分钟成交量
+            try:
+                hist_vol = self.algorithm.data_aggregator.get_daily_history(symbol, 'volume', days=1)
+                volume = hist_vol[-1] if len(hist_vol) > 0 else 0
+            except:
+                volume = sec.Volume if hasattr(sec, 'Volume') else 0
+
+            # 记录前3个样本用于调试
+            if len(sample_debug) < 3:
+                sample_debug.append(f"{symbol}: ${price:.2f}, vol={volume:.0f}, dv=${price*volume:.0f}")
+
+            if price < MIN_PRICE:
+                filter_reasons['price'] += 1
+                continue
+
+            if hasattr(sec, 'Volume'):
+                dollar_vol = volume * price
+                if dollar_vol < MIN_DOLLAR_VOLUME:
+                    filter_reasons['volume'] += 1
+                    continue
+
+            filter_reasons['passed'] += 1
+            valid[symbol] = fv
+
+        self.algorithm.Debug(f"Filter stats: {filter_reasons}")
+        if sample_debug:
+            self.algorithm.Debug(f"Sample securities: {sample_debug}")
+        return valid
+    
+    def _long_short(self, sorted_stocks):
+        n = len(sorted_stocks)
+        n_long = min(int(n * TOP_QUANTILE), MAX_POSITION_COUNT // 2)
+        n_short = min(int(n * BOTTOM_QUANTILE), MAX_POSITION_COUNT // 2)
+        
+        weights = {}
+        
+        if n_long > 0:
+            w = 0.5 / n_long
+            for sym, _ in sorted_stocks[:n_long]:
+                weights[sym] = min(w, MAX_POSITION_SIZE)
+        
+        if n_short > 0:
+            w = -0.5 / n_short
+            for sym, _ in sorted_stocks[-n_short:]:
+                weights[sym] = max(w, -MAX_POSITION_SIZE)
+        
+        return weights
+    
+    def _long_only(self, sorted_stocks):
+        n = len(sorted_stocks)
+        n_long = min(int(n * TOP_QUANTILE), MAX_POSITION_COUNT)
+        
+        weights = {}
+        if n_long > 0:
+            w = 1.0 / n_long
+            for sym, _ in sorted_stocks[:n_long]:
+                weights[sym] = min(w, MAX_POSITION_SIZE)
+        
+        return weights

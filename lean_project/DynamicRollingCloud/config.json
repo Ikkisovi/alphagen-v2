@@ -1,0 +1,8 @@
+{
+    "algorithm-language": "Python",
+    "parameters": {},
+    "description": "Dynamic Rolling Strategy - reads factors from ObjectStore by month",
+    "cloud-id": 25985879,
+    "organization-id": "29188147d6557da536298ed1140cd4d0",
+    "python-venv": 1
+}

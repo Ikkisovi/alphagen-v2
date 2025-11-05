@@ -11,3 +11,37 @@ tb_logs/
 get_baostock_data.ipynb
 get_baostock_data.py
 /utils/
+
+# Output and cache directories
+output/
+*.log
+
+# Data files (CSV, parquet, etc.)
+*.csv
+*.parquet
+*.pkl
+*.pickle
+
+# Environment files
+.env
+*.env
+!*.env.example
+
+# Temporary files
+nul
+*.tmp
+*.cache
+
+# Large binary files
+*.h5
+*.hdf5
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python egg files
+*.egg-info/
+dist/
+build/

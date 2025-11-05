@@ -1,0 +1,187 @@
+# Ensemble Alpha Mining Configuration for Nov–Dec Window Forecasting
+# Targets: predictions for November–December 2025 using merged local dataset
+
+# ============================================================================
+# DATA SOURCE (MERGED CSV/PARQUET)
+# ============================================================================
+data:
+  source: "merged"                              # Use data/merged/merged_data.*
+  path: "daily_am_pm_data.csv"           # CSV fallback (parquet also supported)
+  price_scale: 10000                            # Lean-style price scaling (1 = already scaled)
+  forward_horizon: 22                           # 22 trading days ≈ one month (window-22 returns)
+  max_backtrack_days: 160                       # Allow longer lookback for expressions
+  # max_future_days: auto-calculated based on adjusted forward_horizon (removed to allow automatic adjustment for intraday data)
+  date_column: "date"                           # Column to parse as trading date
+
+  # Feature universe to preload from merged dataset
+  features:
+    - OPEN
+    - HIGH
+    - LOW
+    - CLOSE
+    - VOLUME
+    - VWAP
+    - MARKET_CAP
+    - TURNOVER
+
+  # Features allowed during price-only stage
+  price_features:
+    - OPEN
+    - HIGH
+    - LOW
+    - CLOSE
+    - VOLUME
+    - VWAP
+    - MARKET_CAP
+    - TURNOVER
+
+# ============================================================================
+# TIME WINDOWS
+# ============================================================================
+time_windows:
+  train_12m:
+    name: "12m"
+    start_date: "2024-11-01"
+    end_date: "2025-10-31"
+    description: "12-month history leading into Nov–Dec 2025 forecast"
+
+  train_6m:
+    name: "6m"
+    start_date: "2025-05-01"
+    end_date: "2025-10-31"
+    description: "6-month medium-term window ending Oct 2025"
+
+  train_3m:
+    name: "3m"
+    start_date: "2025-08-01"
+    end_date: "2025-10-31"
+    description: "3-month short-term window ending Oct 2025"
+
+  validation:
+    start_date: "2025-09-01"
+    end_date: "2025-10-31"
+    description: "Validation window using last two months of available data"
+
+# ============================================================================
+# UNIVERSE
+# ============================================================================
+universe:
+  base_instrument: "csi300"    # Placeholder for cache fingerprinting
+  additional_stocks: []        # Merged dataset already contains target symbols
+  fingerprint_file: "output/novdec2025_ensemble/universe_fingerprint.json"
+
+# ============================================================================
+# TRAINING SETTINGS
+# ============================================================================
+training:
+  stage1_technical:
+    enabled: true
+    max_episodes: 220
+    min_episodes: 150
+    early_stopping_patience: 25
+    target_candidates: 70
+    use_fundamentals: false
+    load_fundamentals_for_scaling: false
+    precomputed_features:
+      enabled: false
+
+  stage2_fundamentals:
+    enabled: false
+    max_episodes: 150
+    min_episodes: 100
+    early_stopping_patience: 25
+    top_quartile_only: true
+    target_factors_per_window: 14
+    use_fundamentals: true
+
+  pool_capacity_per_window: 30
+  turnover_penalty_coeff: 0.1
+
+  ppo:
+    learning_rate: 0.00015
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_epsilon: 0.2
+    entropy_coef: 0.01
+    value_loss_coef: 0.5
+
+  device: "cpu"   # Default to CPU; switch to cuda:* when available
+
+# ============================================================================
+# FUNDAMENTAL FEATURES (Stage 2)
+# ============================================================================
+fundamental_features:
+  # Valuation ratios
+  - "PERatio"
+  - "PBRatio"
+  - "PSRatio"
+  - "EVToEBITDA"
+  - "EVToRevenue"
+  - "EVToFCF"
+
+  # Yield metrics
+  - "EarningYield"
+  - "FCFYield"
+  - "SalesYield"
+  - "DividendYield"
+
+  # Forward-looking & market metrics
+  - "ForwardPeRatio"
+  - "SharesOutstanding"
+
+
+# ============================================================================
+# ENSEMBLE SETTINGS
+# ============================================================================
+ensemble:
+  final_capacity: 45
+  auto_prune_weak_factors: true
+
+  optimizer:
+    learning_rate: 0.0004
+    max_steps: 15000
+    tolerance: 800
+    l1_alpha: 0.005
+
+  cross_validation:
+    enabled: true
+    n_folds: 4
+    shrinkage_factor: 0.9
+
+  ic_lower_bound: 0.01
+
+# ============================================================================
+# CACHE
+# ============================================================================
+cache:
+  enabled: true
+  freshness_days: 21
+  check_universe_consistency: true
+  cache_dir: "output/novdec2025_ensemble/cache"
+  skip_training_if_cached: false
+
+# ============================================================================
+# OUTPUT
+# ============================================================================
+output:
+  base_dir: "output/novdec2025_ensemble"
+  save_stage_pool: true
+  stage1_pool: "output/novdec2025_ensemble/{window_name}_stage1_pool.json"
+  stage2_pool: "output/novdec2025_ensemble/{window_name}_stage2_pool.json"
+  pool_12m: "output/novdec2025_ensemble/pool_12m.json"
+  pool_6m: "output/novdec2025_ensemble/pool_6m.json"
+  pool_3m: "output/novdec2025_ensemble/pool_3m.json"
+  final_ensemble: "output/novdec2025_ensemble/ensemble_pool_novdec2025.json"
+  training_log: "output/novdec2025_ensemble/training.log"
+  performance_report: "output/novdec2025_ensemble/performance_report.txt"
+  metrics_file: "output/novdec2025_ensemble/metrics.json"
+  save_detailed_metrics: true
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  console_output: true
+  file_output: true
