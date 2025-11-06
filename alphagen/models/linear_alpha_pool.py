@@ -369,7 +369,10 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
         print(f"Total Evaluations: {stats['eval_count']}")
         print(f"Best IC (ret): {stats['best_ic_ret']:.6f}")
         print(f"Best Objective: {stats['best_obj']:.6f}")
-        print(f"Current Ensemble IC: {stats['current_ensemble_ic']:.6f if stats['current_ensemble_ic'] is not None else 'N/A'}")
+
+        # Fix: Move conditional outside format spec to avoid ValueError
+        ensemble_ic_str = f"{stats['current_ensemble_ic']:.6f}" if stats['current_ensemble_ic'] is not None else 'N/A'
+        print(f"Current Ensemble IC: {ensemble_ic_str}")
         print(f"Best Updates: {stats['best_updates']}")
 
         print(f"\nFailure Statistics (Total: {stats['total_failures']}):")
