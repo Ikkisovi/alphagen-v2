@@ -748,6 +748,22 @@ class EnsembleTrainingCallback(BaseCallback):
         self.logger.record(f'{self.window_name}/pool_size', pool.size)
         self.logger.record(f'{self.window_name}/best_ic', current_ic)
 
+        # Print debug stats every 10 episodes to diagnose plateau issues
+        if self.episode_count % 10 == 0:
+            debug_stats = pool.get_debug_stats()
+            self.logger.info(f"\n[Episode {self.episode_count}] Debug Stats:")
+            self.logger.info(f"  Best IC: {debug_stats['best_ic_ret']:.6f}, Best Obj: {debug_stats['best_obj']:.6f}")
+            self.logger.info(f"  Pool Size: {debug_stats['pool_size']}/{debug_stats['capacity']}")
+            self.logger.info(f"  Best Updates: {debug_stats['best_updates']}, Total Evals: {debug_stats['eval_count']}")
+            if debug_stats['total_failures'] > 0:
+                self.logger.info(f"  Total Failures: {debug_stats['total_failures']} ({100*debug_stats['total_failures']/max(1,debug_stats['eval_count']):.1f}%)")
+                for reason, count in sorted(debug_stats['failure_stats'].items(), key=lambda x: -x[1])[:3]:
+                    self.logger.info(f"    - {reason}: {count}")
+            if 'recent_objective_components' in debug_stats and len(debug_stats['recent_objective_components']) > 0:
+                latest = debug_stats['recent_objective_components'][-1]
+                self.logger.info(f"  Latest Objective: IC={latest['ic']:.4f}, ICIR={latest['icir']:.4f}, "
+                               f"Turnover={latest['turnover_penalty']:.4f}, Final={latest['final']:.4f}")
+
         # Early stopping check
         if current_ic > self.best_ic + 1e-5:  # Small epsilon for numerical stability
             self.best_ic = current_ic
@@ -763,6 +779,10 @@ class EnsembleTrainingCallback(BaseCallback):
 
         # Trigger early stopping if no improvement
         if self.episodes_since_improvement >= self.early_stopping_patience:
+            # Print full debug stats before stopping
+            self.logger.info(f"\nEarly stopping triggered. Final debug statistics:")
+            pool.print_debug_stats()
+
             self.logger.info(
                 f"Early stopping triggered for {self.window_name} "
                 f"after {self.episode_count} episodes "

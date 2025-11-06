@@ -61,6 +61,21 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
     def try_new_expr(self, expr: Expression) -> float:
         ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=0.99)
         if ic_ret is None or ic_mut is None or np.isnan(ic_ret) or np.isnan(ic_mut).any():
+            # Log why this expression failed
+            failure_reason = "unknown"
+            if ic_ret is None:
+                failure_reason = "ic_ret is None"
+            elif ic_mut is None:
+                failure_reason = "ic_mut is None (high correlation or below threshold)"
+            elif np.isnan(ic_ret):
+                failure_reason = "ic_ret is NaN"
+            elif np.isnan(ic_mut).any():
+                failure_reason = "ic_mut contains NaN"
+
+            # Store failure stats for debugging
+            if not hasattr(self, '_failure_stats'):
+                self._failure_stats = {}
+            self._failure_stats[failure_reason] = self._failure_stats.get(failure_reason, 0) + 1
             return 0.
         if str(expr) in self._failure_cache:
             return self.best_obj
@@ -154,10 +169,24 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
         "Get the main optimization objective, return None for the default (ensemble IC)."
 
     def _maybe_update_best(self, ic: float, obj: float) -> bool:
+        # Track all objective values for debugging
+        if not hasattr(self, '_obj_history'):
+            self._obj_history = []
+        self._obj_history.append((ic, obj))
+
         if obj <= self.best_obj:
             return False
+
+        # Log when best is updated
+        old_best_obj = self.best_obj
+        old_best_ic = self.best_ic_ret
         self.best_obj = obj
         self.best_ic_ret = ic
+
+        if not hasattr(self, '_best_update_count'):
+            self._best_update_count = 0
+        self._best_update_count += 1
+
         return True
 
     @abstractmethod
@@ -266,7 +295,7 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
     def _swap_idx(self, i: int, j: int) -> None:
         if i == j:
             return
-        
+
         def swap_in_list(lst, i: int, j: int) -> None:
             lst[i], lst[j] = lst[j], lst[i]
 
@@ -276,6 +305,101 @@ class LinearAlphaPool(AlphaPoolBase, metaclass=ABCMeta):
         self._mutual_ics[[i, j], :] = self._mutual_ics[[j, i], :]
         swap_in_list(self._weights, i, j)
         swap_in_list(self._extra_info, i, j)
+
+    def get_debug_stats(self) -> Dict[str, Any]:
+        """Get debugging statistics to understand why best_ic_ret might not be improving."""
+        stats = {
+            'pool_size': self.size,
+            'capacity': self.capacity,
+            'eval_count': self.eval_cnt,
+            'best_ic_ret': self.best_ic_ret,
+            'best_obj': self.best_obj,
+            'current_ensemble_ic': self.evaluate_ensemble() if self.size > 0 else None,
+        }
+
+        # Failure statistics
+        if hasattr(self, '_failure_stats'):
+            stats['failure_stats'] = self._failure_stats
+            stats['total_failures'] = sum(self._failure_stats.values())
+        else:
+            stats['failure_stats'] = {}
+            stats['total_failures'] = 0
+
+        # Best update count
+        if hasattr(self, '_best_update_count'):
+            stats['best_updates'] = self._best_update_count
+        else:
+            stats['best_updates'] = 0
+
+        # Recent objective history (last 10)
+        if hasattr(self, '_obj_history') and len(self._obj_history) > 0:
+            recent = self._obj_history[-10:]
+            stats['recent_objectives'] = [
+                {'ic': ic, 'obj': obj} for ic, obj in recent
+            ]
+            # Statistics on objectives
+            all_objs = [obj for ic, obj in self._obj_history]
+            stats['obj_stats'] = {
+                'min': min(all_objs),
+                'max': max(all_objs),
+                'mean': sum(all_objs) / len(all_objs),
+                'count': len(all_objs)
+            }
+        else:
+            stats['recent_objectives'] = []
+            stats['obj_stats'] = None
+
+        # For CustomRewardAlphaPool, show objective components
+        if hasattr(self, '_objective_components') and len(self._objective_components) > 0:
+            recent_components = self._objective_components[-10:]
+            stats['recent_objective_components'] = recent_components
+
+        if hasattr(self, '_objective_errors') and len(self._objective_errors) > 0:
+            stats['objective_errors'] = self._objective_errors[-10:]
+
+        return stats
+
+    def print_debug_stats(self) -> None:
+        """Print debugging statistics in a human-readable format."""
+        stats = self.get_debug_stats()
+        print("\n" + "="*60)
+        print("ALPHA POOL DEBUG STATISTICS")
+        print("="*60)
+        print(f"Pool Size: {stats['pool_size']}/{stats['capacity']}")
+        print(f"Total Evaluations: {stats['eval_count']}")
+        print(f"Best IC (ret): {stats['best_ic_ret']:.6f}")
+        print(f"Best Objective: {stats['best_obj']:.6f}")
+        print(f"Current Ensemble IC: {stats['current_ensemble_ic']:.6f if stats['current_ensemble_ic'] is not None else 'N/A'}")
+        print(f"Best Updates: {stats['best_updates']}")
+
+        print(f"\nFailure Statistics (Total: {stats['total_failures']}):")
+        for reason, count in sorted(stats['failure_stats'].items(), key=lambda x: -x[1]):
+            pct = 100.0 * count / stats['eval_count'] if stats['eval_count'] > 0 else 0
+            print(f"  {reason}: {count} ({pct:.1f}%)")
+
+        if stats['obj_stats']:
+            print(f"\nObjective Statistics ({stats['obj_stats']['count']} values):")
+            print(f"  Min:  {stats['obj_stats']['min']:.6f}")
+            print(f"  Max:  {stats['obj_stats']['max']:.6f}")
+            print(f"  Mean: {stats['obj_stats']['mean']:.6f}")
+
+        if stats['recent_objectives']:
+            print(f"\nRecent Objectives (last {len(stats['recent_objectives'])}):")
+            for i, entry in enumerate(stats['recent_objectives'], 1):
+                print(f"  {i}. IC={entry['ic']:.6f}, Obj={entry['obj']:.6f}")
+
+        if 'recent_objective_components' in stats:
+            print(f"\nRecent Objective Components (last {len(stats['recent_objective_components'])}):")
+            for i, comp in enumerate(stats['recent_objective_components'], 1):
+                print(f"  {i}. IC={comp['ic']:.4f}, ICIR={comp['icir']:.4f}, "
+                      f"Turnover={comp['turnover_penalty']:.4f}, Final={comp['final']:.4f}")
+
+        if 'objective_errors' in stats:
+            print(f"\nObjective Calculation Errors:")
+            for err in stats['objective_errors']:
+                print(f"  - {err}")
+
+        print("="*60 + "\n")
 
 
 class MseAlphaPool(LinearAlphaPool):
@@ -425,44 +549,68 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
         super().__init__(capacity, calculator, ic_lower_bound, l1_alpha, lcb_beta, device)
         self.turnover_penalty_coeff = turnover_penalty_coeff
 
-    def _calc_main_objective(self) -> float:
+    def _calc_main_objective(self) -> Optional[float]:
         if self.size == 0:
-            return 0.0
+            return None
 
-        alpha_values = torch.stack(self._extra_info[:self.size])
-        weights = torch.tensor(self.weights, device=self.device)
-        
-        # Calculate Ensemble IC and ICIR from weighted alpha
-        target_value = self.calculator.target
-        weighted_alpha = (weights[:, None, None] * alpha_values).sum(dim=0)
-        ics = batch_pearsonr(weighted_alpha, target_value)
-        
-        ensemble_ic = ics.mean().item()
-        if math.isnan(ensemble_ic):
-            ensemble_ic = 0.0
+        try:
+            alpha_values = torch.stack(self._extra_info[:self.size])
+            weights = torch.tensor(self.weights, device=self.device)
 
-        ic_mean = ics.mean()
-        ic_std = ics.std()
-        if torch.isnan(ic_std) or ic_std.item() < 1e-6:
-            ensemble_icir = 0.0
-        else:
-            ensemble_icir = (ic_mean / ic_std).item()
-            if not math.isfinite(ensemble_icir):
+            # Calculate Ensemble IC and ICIR from weighted alpha
+            target_value = self.calculator.target
+            weighted_alpha = (weights[:, None, None] * alpha_values).sum(dim=0)
+            ics = batch_pearsonr(weighted_alpha, target_value)
+
+            # Check for NaN in IC calculation - this is critical
+            if torch.isnan(ics).any():
+                return None
+
+            ensemble_ic = ics.mean().item()
+            if not math.isfinite(ensemble_ic):
+                return None
+
+            ic_mean = ics.mean()
+            ic_std = ics.std()
+
+            # If std is too small or NaN, we can't calculate ICIR reliably
+            if torch.isnan(ic_std) or ic_std.item() < 1e-6:
                 ensemble_icir = 0.0
+            else:
+                ensemble_icir = (ic_mean / ic_std).item()
+                if not math.isfinite(ensemble_icir):
+                    ensemble_icir = 0.0
 
-        # Calculate Turnover Penalty for the ensemble
-        turnover_penalty = 0.0
-        if self.turnover_penalty_coeff > 0 and weighted_alpha.shape[0] > 1:
-            # Calculate day-over-day correlation for the weighted alpha values
-            valid_mask = ~torch.isnan(weighted_alpha)
-            valid_values = torch.where(valid_mask, weighted_alpha, torch.tensor(0.0, device=self.device))
+            # Calculate Turnover Penalty for the ensemble
+            turnover_penalty = 0.0
+            if self.turnover_penalty_coeff > 0 and weighted_alpha.shape[0] > 1:
+                # Calculate day-over-day correlation for the weighted alpha values
+                valid_mask = ~torch.isnan(weighted_alpha)
+                valid_values = torch.where(valid_mask, weighted_alpha, torch.tensor(0.0, device=self.device))
 
-            daily_corr = batch_pearsonr(valid_values[:-1], valid_values[1:]).mean().item()
-            if math.isfinite(daily_corr):
-                # Turnover is 1 - correlation.
-                turnover = 1.0 - daily_corr
-                turnover_penalty = self.turnover_penalty_coeff * turnover
+                daily_corr = batch_pearsonr(valid_values[:-1], valid_values[1:]).mean().item()
+                if math.isfinite(daily_corr):
+                    # Turnover is 1 - correlation.
+                    turnover = 1.0 - daily_corr
+                    turnover_penalty = self.turnover_penalty_coeff * turnover
 
-        # Combine them
-        final_objective = ensemble_ic + ensemble_icir - turnover_penalty
-        return final_objective
+            # Combine them
+            final_objective = ensemble_ic + ensemble_icir - turnover_penalty
+
+            # Store components for debugging
+            if not hasattr(self, '_objective_components'):
+                self._objective_components = []
+            self._objective_components.append({
+                'ic': ensemble_ic,
+                'icir': ensemble_icir,
+                'turnover_penalty': turnover_penalty,
+                'final': final_objective
+            })
+
+            return final_objective
+        except Exception as e:
+            # If anything goes wrong, return None to fall back to IC
+            if not hasattr(self, '_objective_errors'):
+                self._objective_errors = []
+            self._objective_errors.append(str(e))
+            return None
