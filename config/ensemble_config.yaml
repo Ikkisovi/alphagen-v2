@@ -57,6 +57,8 @@ data:
     - close
     - volume
     - vwap
+    - market_cap
+    - turnover
   feature_patterns:
     - open
     - high
@@ -108,7 +110,7 @@ training:
     use_fundamentals: false
 
   stage2_fundamentals:
-    enabled: true
+    enabled: false  # Disabled - using single stage training
     max_episodes: 500
     min_episodes: 400
     early_stopping_patience: 30

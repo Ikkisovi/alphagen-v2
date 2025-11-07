@@ -866,7 +866,8 @@ class EnsembleTrainingCallback(BaseCallback):
         save_path: str,
         window_name: str,
         early_stopping_patience: int = 30,
-        verbose: int = 0
+        verbose: int = 0,
+        python_logger: Optional[logging.Logger] = None
     ):
         super().__init__(verbose)
         self.save_path = save_path
@@ -875,9 +876,16 @@ class EnsembleTrainingCallback(BaseCallback):
         self.best_ic = -float('inf')
         self.episodes_since_improvement = 0
         self.episode_count = 0
+        self.python_logger = python_logger
         os.makedirs(self.save_path, exist_ok=True)
 
     def _on_step(self) -> bool:
+        # Log progress every 2000 steps
+        if self.num_timesteps % 2000 == 0 and self.python_logger:
+            pool = self.training_env.envs[0].unwrapped.pool
+            self.python_logger.info(
+                f"Steps: {self.num_timesteps}, Pool size: {pool.size}, Best IC: {pool.best_ic_ret:.6f}"
+            )
         return True
 
     def _on_rollout_end(self) -> None:
@@ -894,17 +902,18 @@ class EnsembleTrainingCallback(BaseCallback):
         # Print debug stats every 10 episodes to diagnose plateau issues
         if self.episode_count % 10 == 0:
             debug_stats = pool.get_debug_stats()
-            self.logger.info(f"\n[Episode {self.episode_count}] Debug Stats:")
-            self.logger.info(f"  Best IC: {debug_stats['best_ic_ret']:.6f}, Best Obj: {debug_stats['best_obj']:.6f}")
-            self.logger.info(f"  Pool Size: {debug_stats['pool_size']}/{debug_stats['capacity']}")
-            self.logger.info(f"  Best Updates: {debug_stats['best_updates']}, Total Evals: {debug_stats['eval_count']}")
+            log_func = self.python_logger.info if self.python_logger else self.logger.info
+            log_func(f"\n[Episode {self.episode_count}] Debug Stats:")
+            log_func(f"  Best IC: {debug_stats['best_ic_ret']:.6f}, Best Obj: {debug_stats['best_obj']:.6f}")
+            log_func(f"  Pool Size: {debug_stats['pool_size']}/{debug_stats['capacity']}")
+            log_func(f"  Best Updates: {debug_stats['best_updates']}, Total Evals: {debug_stats['eval_count']}")
             if debug_stats['total_failures'] > 0:
-                self.logger.info(f"  Total Failures: {debug_stats['total_failures']} ({100*debug_stats['total_failures']/max(1,debug_stats['eval_count']):.1f}%)")
+                log_func(f"  Total Failures: {debug_stats['total_failures']} ({100*debug_stats['total_failures']/max(1,debug_stats['eval_count']):.1f}%)")
                 for reason, count in sorted(debug_stats['failure_stats'].items(), key=lambda x: -x[1])[:3]:
-                    self.logger.info(f"    - {reason}: {count}")
+                    log_func(f"    - {reason}: {count}")
             if 'recent_objective_components' in debug_stats and len(debug_stats['recent_objective_components']) > 0:
                 latest = debug_stats['recent_objective_components'][-1]
-                self.logger.info(f"  Latest Objective: IC={latest['ic']:.4f}, ICIR={latest['icir']:.4f}, "
+                log_func(f"  Latest Objective: IC={latest['ic']:.4f}, ICIR={latest['icir']:.4f}, "
                                f"Turnover={latest['turnover_penalty']:.4f}, Final={latest['final']:.4f}")
 
         # Early stopping check
@@ -923,10 +932,11 @@ class EnsembleTrainingCallback(BaseCallback):
         # Trigger early stopping if no improvement
         if self.episodes_since_improvement >= self.early_stopping_patience:
             # Print full debug stats before stopping
-            self.logger.info(f"\nEarly stopping triggered. Final debug statistics:")
+            log_func = self.python_logger.info if self.python_logger else self.logger.info
+            log_func(f"\nEarly stopping triggered. Final debug statistics:")
             pool.print_debug_stats()
 
-            self.logger.info(
+            log_func(
                 f"Early stopping triggered for {self.window_name} "
                 f"after {self.episode_count} episodes "
                 f"(no improvement for {self.early_stopping_patience} episodes)"
@@ -1047,7 +1057,7 @@ def train_single_window(
             gamma=ppo_config['gamma'],
             ent_coef=ppo_config['entropy_coef'],
             vf_coef=ppo_config['value_loss_coef'],
-            verbose=1,
+            verbose=0,  # Set to 0 to avoid colorama conflicts on Windows
             tensorboard_log=str(output_dir / 'tensorboard_stage1')
         )
 
@@ -1055,7 +1065,8 @@ def train_single_window(
         callback = EnsembleTrainingCallback(
             save_path=str(output_dir),
             window_name=f"{window_name}_stage1",
-            early_stopping_patience=stage1_config['early_stopping_patience']
+            early_stopping_patience=stage1_config['early_stopping_patience'],
+            python_logger=logger
         )
 
         # Train
@@ -1185,14 +1196,15 @@ def train_single_window(
             gamma=ppo_config['gamma'],
             ent_coef=ppo_config['entropy_coef'],
             vf_coef=ppo_config['value_loss_coef'],
-            verbose=1,
+            verbose=0,  # Set to 0 to avoid colorama conflicts on Windows
             tensorboard_log=str(output_dir / 'tensorboard_stage2')
         )
 
         callback = EnsembleTrainingCallback(
             save_path=str(output_dir),
             window_name=f"{window_name}_stage2",
-            early_stopping_patience=stage2_config['early_stopping_patience']
+            early_stopping_patience=stage2_config['early_stopping_patience'],
+            python_logger=logger
         )
 
         max_steps = stage2_config['max_episodes'] * 200
