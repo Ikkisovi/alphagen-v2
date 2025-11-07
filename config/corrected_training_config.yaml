@@ -9,11 +9,23 @@
 # TIME WINDOWS
 # ============================================================================
 time_windows:
-  train_long:
-    name: "long"
-    start_date: "2020-01-01"  # Use 5+ years for robust IC estimation
+  train_12m:
+    name: "12m"
+    start_date: "2024-11-01"  # ~12 month training lookback
     end_date: "2025-10-31"
-    description: "Long-term historical window"
+    description: "Primary 12-month training window"
+
+  train_6m:
+    name: "6m"
+    start_date: "2025-05-01"  # ~6 month training lookback
+    end_date: "2025-10-31"
+    description: "Secondary 6-month training window"
+
+  train_3m:
+    name: "3m"
+    start_date: "2025-08-01"  # ~3 month training lookback
+    end_date: "2025-10-31"
+    description: "Tactical 3-month training window"
 
   validation:
     start_date: "2025-07-01"
@@ -112,7 +124,9 @@ ensemble:
 # ============================================================================
 output:
   base_dir: "output/corrected_training"
-  pool_long: "output/corrected_training/pool_long.json"
+  pool_12m: "output/corrected_training/pool_12m.json"
+  pool_6m: "output/corrected_training/pool_6m.json"
+  pool_3m: "output/corrected_training/pool_3m.json"
   final_ensemble: "output/corrected_training/ensemble_pool.json"
   training_log: "output/corrected_training/training.log"
   performance_report: "output/corrected_training/report.txt"
