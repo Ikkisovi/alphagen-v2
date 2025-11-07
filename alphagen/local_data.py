@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, MutableMapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -197,31 +197,32 @@ def _pivot_features(
     Convert the aggregated DataFrame into a dense (days, features, stocks) cube.
     """
 
-    col_map = {
-        FeatureType.OPEN: "open",
-        FeatureType.CLOSE: "close",
-        FeatureType.HIGH: "high",
-        FeatureType.LOW: "low",
-        FeatureType.VOLUME: "volume",
-        FeatureType.VWAP: "vwap",
-        FeatureType.PE_RATIO: "pe_ratio",
-        FeatureType.PB_RATIO: "pb_ratio",
-        FeatureType.PS_RATIO: "ps_ratio",
-        FeatureType.EV_TO_EBITDA: "ev_to_ebitda",
-        FeatureType.EV_TO_REVENUE: "ev_to_revenue",
-        FeatureType.EV_TO_FCF: "ev_to_fcf",
-        FeatureType.EARNINGS_YIELD: "earnings_yield",
-        FeatureType.FCF_YIELD: "fcf_yield",
-        FeatureType.SALES_YIELD: "sales_yield",
-        FeatureType.FORWARD_PE_RATIO: "forward_pe_ratio",
-        FeatureType.SHARES_OUTSTANDING: "shares_outstanding",
-        FeatureType.MARKET_CAP: "mktcap",
-        FeatureType.TURNOVER: "turnover",
+    column_aliases: Mapping[FeatureType, Sequence[str]] = {
+        FeatureType.OPEN: ("open",),
+        FeatureType.CLOSE: ("close",),
+        FeatureType.HIGH: ("high",),
+        FeatureType.LOW: ("low",),
+        FeatureType.VOLUME: ("volume",),
+        FeatureType.VWAP: ("vwap",),
+        FeatureType.PE_RATIO: ("pe_ratio",),
+        FeatureType.PB_RATIO: ("pb_ratio",),
+        FeatureType.PS_RATIO: ("ps_ratio",),
+        FeatureType.EV_TO_EBITDA: ("ev_to_ebitda",),
+        FeatureType.EV_TO_REVENUE: ("ev_to_revenue",),
+        FeatureType.EV_TO_FCF: ("ev_to_fcf",),
+        FeatureType.EARNINGS_YIELD: ("earnings_yield",),
+        FeatureType.FCF_YIELD: ("fcf_yield",),
+        FeatureType.SALES_YIELD: ("sales_yield",),
+        FeatureType.FORWARD_PE_RATIO: ("forward_pe_ratio",),
+        FeatureType.SHARES_OUTSTANDING: ("shares_outstanding",),
+        FeatureType.MARKET_CAP: ("market_cap", "mktcap"),
+        FeatureType.TURNOVER: ("turnover",),
     }
     tensors = []
     for feature in features:
-        column = col_map.get(feature)
-        if column is None or column not in daily.columns:
+        aliases = column_aliases.get(feature, ())
+        column = next((name for name in aliases if name in daily.columns), None)
+        if column is None:
             pivot = np.full((len(dates), len(symbols)), np.nan, dtype=np.float32)
         else:
             pivot = (
@@ -234,35 +235,24 @@ def _pivot_features(
     return stacked
 
 
-def load_local_stock_data(
-    data_path: Path | str,
-    *,
-    config: LocalDataConfig | None = None,
+def _dataframe_to_stock_data(
+    frame: pd.DataFrame,
+    cfg: LocalDataConfig,
 ) -> StockData:
-    """
-    Load local OHLCV pickle data into a `StockData` instance that AlphaGen can
-    consume directly.
-    """
+    """Convert a normalized long-format frame into a ``StockData`` cube."""
 
-    cfg = config or LocalDataConfig()
-    stock_data_mod._QLIB_INITIALIZED = True  # type: ignore[attr-defined]
+    if frame.empty:
+        raise ValueError("No rows available to build StockData from feature frame")
 
-    data_path = Path(data_path).expanduser().resolve()
-    if not data_path.exists():
-        raise FileNotFoundError(f"Data file not found: {data_path}")
+    normalized = frame.copy()
+    normalized["symbol"] = normalized["symbol"].astype(str)
+    normalized["date"] = pd.to_datetime(normalized["date"])
+    normalized.sort_values(["symbol", "date"], inplace=True)
 
-    daily = pd.read_csv(data_path)
-    # The 'timestamp' column has the unique AM/PM timestamps we need for pivoting.
-    # The existing 'date' column is just the day, so we drop it.
-    daily.drop(columns=['date'], inplace=True)
-    # We rename 'timestamp' to 'date' because the rest of the function expects that name.
-    daily.rename(columns={'timestamp': 'date'}, inplace=True)
-    daily['date'] = pd.to_datetime(daily['date'], utc=True)
-    # Fundamental attachment and further aggregation is skipped as the CSV is pre-processed
+    symbols = sorted(normalized["symbol"].unique().tolist())
+    dates = pd.Index(sorted(normalized["date"].unique()))
 
-    symbols = sorted(daily["symbol"].unique().tolist())
-    dates = pd.Index(sorted(daily["date"].unique()))
-    cube = _pivot_features(daily, cfg.features, dates, symbols)
+    cube = _pivot_features(normalized, cfg.features, dates, symbols)
 
     total_len = cfg.max_backtrack_days + cube.shape[0] + cfg.max_future_days
     padded = np.full(
@@ -289,4 +279,108 @@ def load_local_stock_data(
     return stock
 
 
-__all__ = ["LocalDataConfig", "load_local_stock_data"]
+_DEFAULT_SESSION_OFFSETS: MutableMapping[str, pd.Timedelta] = {
+    "AM": pd.Timedelta(hours=12),
+    "PM": pd.Timedelta(hours=16),
+}
+
+
+def _resolve_session_offsets(
+    session_time_map: Mapping[str, object] | None,
+) -> Mapping[str, pd.Timedelta]:
+    """Normalize a mapping of session labels to ``pd.Timedelta`` offsets."""
+
+    if session_time_map is None:
+        return dict(_DEFAULT_SESSION_OFFSETS)
+
+    resolved: dict[str, pd.Timedelta] = {}
+    for key, value in session_time_map.items():
+        label = str(key).upper()
+        if isinstance(value, pd.Timedelta):
+            offset = value
+        elif isinstance(value, (int, float)):
+            offset = pd.Timedelta(hours=float(value))
+        else:
+            offset = pd.to_timedelta(value)
+        resolved[label] = offset
+    return resolved
+
+
+def load_local_stock_data(
+    data_path: Path | str,
+    *,
+    config: LocalDataConfig | None = None,
+) -> StockData:
+    """
+    Load local OHLCV pickle data into a `StockData` instance that AlphaGen can
+    consume directly.
+    """
+
+    cfg = config or LocalDataConfig()
+    stock_data_mod._QLIB_INITIALIZED = True  # type: ignore[attr-defined]
+
+    data_path = Path(data_path).expanduser().resolve()
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data file not found: {data_path}")
+
+    daily = pd.read_csv(data_path)
+    # The 'timestamp' column has the unique AM/PM timestamps we need for pivoting.
+    # The existing 'date' column is just the day, so we drop it.
+    daily.drop(columns=["date"], inplace=True)
+    # We rename 'timestamp' to 'date' because the rest of the function expects that name.
+    daily.rename(columns={"timestamp": "date"}, inplace=True)
+    daily["date"] = pd.to_datetime(daily["date"], utc=True)
+    # Fundamental attachment and further aggregation is skipped as the CSV is pre-processed
+
+    return _dataframe_to_stock_data(daily, cfg)
+
+
+def build_feature_store_stock_data(
+    frame: pd.DataFrame,
+    *,
+    config: LocalDataConfig | None = None,
+    timezone: str | None = "UTC",
+    session_time_map: Mapping[str, object] | None = None,
+) -> StockData:
+    """Convert a feature-store long table into ``StockData`` with AM/PM ordering."""
+
+    cfg = config or LocalDataConfig()
+
+    normalized = frame.copy()
+    if "session" not in normalized.columns:
+        raise ValueError("Feature store frame must contain a 'session' column")
+
+    normalized["session"] = normalized["session"].astype(str).str.upper()
+    offsets = _resolve_session_offsets(session_time_map)
+
+    unknown_sessions = set(normalized["session"].unique()) - set(offsets.keys())
+    if unknown_sessions:
+        raise ValueError(
+            "Encountered sessions without configured offsets: "
+            + ", ".join(sorted(unknown_sessions))
+        )
+
+    base_dates = pd.to_datetime(normalized["date"])
+    offsets_series = normalized["session"].map(offsets)
+    if offsets_series.isna().any():
+        raise ValueError("Session offset mapping produced NaN values")
+
+    timestamps = base_dates + offsets_series
+    timestamps = pd.to_datetime(timestamps)
+    if timezone:
+        if timestamps.dt.tz is None:
+            timestamps = timestamps.dt.tz_localize(timezone)
+        else:
+            timestamps = timestamps.dt.tz_convert(timezone)
+
+    normalized["date"] = timestamps
+    normalized.drop(columns=["session"], inplace=True)
+
+    return _dataframe_to_stock_data(normalized, cfg)
+
+
+__all__ = [
+    "LocalDataConfig",
+    "load_local_stock_data",
+    "build_feature_store_stock_data",
+]
