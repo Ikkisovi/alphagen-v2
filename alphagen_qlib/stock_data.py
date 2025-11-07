@@ -82,8 +82,6 @@ class StockData:
         device: torch.device = torch.device("cuda:0"),
         preloaded_data: Optional[Tuple[torch.Tensor, pd.Index, pd.Index]] = None
     ) -> None:
-        self._init_qlib()
-
         self._instrument = instrument
         self.max_backtrack_days = max_backtrack_days
         self.max_future_days = max_future_days
@@ -91,6 +89,11 @@ class StockData:
         self._end_time = end_time
         self._features = features if features is not None else list(FeatureType)
         self.device = device
+
+        # Only initialize qlib if we need to load data from it
+        if preloaded_data is None:
+            self._init_qlib()
+
         data_tup = preloaded_data if preloaded_data is not None else self._get_data()
         self.data, self._dates, self._stock_ids = data_tup
 
