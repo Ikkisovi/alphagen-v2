@@ -45,3 +45,10 @@ env/
 *.egg-info/
 dist/
 build/
+
+# Pipeline data files and outputs
+am_pm_base_data.csv
+daily_am_pm_data_with_features.csv
+/alphagen_data_pipeline/feature_store/
+e:/factor/feature_store/
+*_features_test/
