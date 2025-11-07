@@ -5,7 +5,8 @@
 # TIME WINDOWS
 # ============================================================================
 time_windows:
-  # Training windows (aligned to trading calendar)
+  # Training windows (aligned to trading calendar). Set `reward:` inside any
+  # window block to override the global turnover penalty settings.
   train_12m:
     name: "12m"
     start_date: "2023-01-01"
@@ -23,6 +24,8 @@ time_windows:
     start_date: "2023-10-01"
     end_date: "2023-12-31"
     description: "3-month short-term window"
+    # reward:
+    #   turnover_penalty_coeff: 0.02  # Example per-window override
 
   # Validation window for final ensemble optimization
   validation:
@@ -125,8 +128,12 @@ training:
     value_loss_coef: 0.5
 
   reward:
+    # Configure turnover penalty parameters globally; individual windows can
+    # override these values via time_windows.<window>.reward if needed.
     objective: "IC + ICIR - turnover_penalty"
     turnover_penalty_coeff: 0.05
+    turnover_rebalance_horizon: 20
+    turnover_top_k_ratio: 0.1
 
   # Device configuration
   device: "cuda:0"  # Use GPU if available, fallback to CPU

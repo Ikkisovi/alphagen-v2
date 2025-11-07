@@ -770,11 +770,25 @@ def train_single_window(
     # STAGE 1: Technical/Price-Only Sweep
     # ========================================================================
     stage1_config = training_config['stage1_technical']
-    reward_config = training_config.get('reward', {})
+    reward_config = dict(training_config.get('reward', {}))
+    window_reward_overrides = window_config.get('reward')
+    if window_reward_overrides:
+        reward_config.update(window_reward_overrides)
     turnover_penalty_coeff = reward_config.get('turnover_penalty_coeff', training_config.get('turnover_penalty_coeff', 0.0))
+    turnover_rebalance_horizon = int(reward_config.get('turnover_rebalance_horizon', data_context.forward_horizon))
+    turnover_top_k = reward_config.get('turnover_top_k')
+    if turnover_top_k is not None:
+        turnover_top_k = int(turnover_top_k)
+    turnover_top_k_ratio = float(reward_config.get('turnover_top_k_ratio', 0.1))
     objective_description = reward_config.get('objective', 'IC + ICIR - turnover_penalty')
     if objective_description:
         logger.info(f"Reward objective: {objective_description} (turnover_penalty_coeff={turnover_penalty_coeff})")
+    logger.info(
+        "Turnover settings: rebalance_horizon=%d, top_k=%s, top_k_ratio=%.3f",
+        turnover_rebalance_horizon,
+        str(turnover_top_k) if turnover_top_k is not None else "auto",
+        turnover_top_k_ratio,
+    )
     stage1_pool: Dict[str, List[Any]]
     if stage1_config.get('enabled', True):
         logger.info(f"Stage 1: Technical/price-only sweep")
@@ -796,6 +810,9 @@ def train_single_window(
             ic_lower_bound=config['ensemble'].get('ic_lower_bound', 0.01),
             l1_alpha=config['ensemble']['optimizer']['l1_alpha'],
             turnover_penalty_coeff=turnover_penalty_coeff,
+            turnover_rebalance_horizon=turnover_rebalance_horizon,
+            turnover_top_k=turnover_top_k,
+            turnover_top_k_ratio=turnover_top_k_ratio,
             device=device
         )
 
