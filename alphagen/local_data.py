@@ -249,6 +249,14 @@ def _dataframe_to_stock_data(
     normalized["date"] = pd.to_datetime(normalized["date"])
     normalized.sort_values(["symbol", "date"], inplace=True)
 
+    # Check for and handle duplicate (date, symbol) entries
+    duplicate_mask = normalized.duplicated(subset=["date", "symbol"], keep=False)
+    if duplicate_mask.any():
+        num_duplicates = duplicate_mask.sum()
+        print(f"  Warning: Found {num_duplicates} duplicate (date, symbol) entries - keeping last occurrence")
+        # Keep the last occurrence of each (date, symbol) pair
+        normalized = normalized.drop_duplicates(subset=["date", "symbol"], keep="last")
+
     symbols = sorted(normalized["symbol"].unique().tolist())
     dates = pd.Index(sorted(normalized["date"].unique()))
 
