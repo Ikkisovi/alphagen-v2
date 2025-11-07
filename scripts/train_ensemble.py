@@ -656,9 +656,16 @@ class EnsembleTrainingCallback(BaseCallback):
         # Log progress every 2000 steps
         if self.num_timesteps % 2000 == 0 and self.training_env is not None:
             pool = self.training_env.envs[0].unwrapped.pool
+
+            # FIX 1: Always print to terminal for real-time monitoring
+            print(f"\n[Step {self.num_timesteps}] Pool size: {pool.size}, Best IC: {pool.best_ic_ret:.6f}", flush=True)
+
+            # Also log to logger
             message = f"Steps: {self.num_timesteps}, Pool size: {pool.size}, Best IC: {pool.best_ic_ret:.6f}"
             if self.python_logger:
                 self.python_logger.info(message)
+
+            # Record to tensorboard
             self.logger.record(f'{self.window_name}/pool_size_step', pool.size)
             self.logger.record(f'{self.window_name}/best_ic_step', pool.best_ic_ret)
             self.logger.dump(step=self.num_timesteps)
@@ -678,6 +685,15 @@ class EnsembleTrainingCallback(BaseCallback):
         # Print debug stats every 10 episodes to diagnose plateau issues
         if self.episode_count % 10 == 0:
             debug_stats = pool.get_debug_stats()
+
+            # FIX 1: Print to terminal for real-time monitoring
+            print(f"\n[Episode {self.episode_count}] Best IC: {debug_stats['best_ic_ret']:.6f}, Best Obj: {debug_stats['best_obj']:.6f}", flush=True)
+
+            # Also print ICIR components if available
+            if hasattr(pool, '_objective_components') and pool._objective_components:
+                last = pool._objective_components[-1]
+                print(f"  IC: {last['ic']:.6f}, ICIR: {last['icir']:.6f}, Turnover: {last['turnover']:.4f}, Penalty: {last['turnover_penalty']:.4f}", flush=True)
+
             log_func = self.python_logger.info if self.python_logger else self.logger.info
             log_func(f"\n[Episode {self.episode_count}] Debug Stats:")
             log_func(f"  Best IC: {debug_stats['best_ic_ret']:.6f}, Best Obj: {debug_stats['best_obj']:.6f}")
@@ -753,7 +769,36 @@ def train_single_window(
 
     # Create target
     close = Feature(FeatureType.CLOSE)
-    forward_horizon = max(1, int(data_context.forward_horizon))
+
+    # FIX 4: Adjust forward_horizon based on data frequency to ensure consistent prediction window
+    # Original alphagen predicts 20 trading days with daily data
+    # For AM/PM data (2 periods per day), need 40 periods to predict 20 days
+    forward_horizon_config = max(1, int(data_context.forward_horizon))
+
+    # Detect data frequency by checking if sessions exist in the data
+    data_freq = 'daily'  # Default
+    if hasattr(data_context.stock_data, '_data') and hasattr(data_context.stock_data._data, 'index'):
+        # Check if session column exists (indicates AM/PM data)
+        if 'session' in data_context.stock_data._data.columns:
+            data_freq = 'ampm'
+
+    # Calculate actual forward_horizon to use
+    if data_freq == 'ampm':
+        # For AM/PM data: forward_horizon should be 2x to represent same number of days
+        # e.g., forward_horizon_config=20 (days) -> 40 periods
+        # But if config already specified periods, use as-is
+        # Check if config value is already adjusted (>=30 suggests it's in periods)
+        if forward_horizon_config < 30:
+            forward_horizon = forward_horizon_config * 2  # Convert days to periods
+            logger.info(f"AM/PM data detected: Using forward_horizon={forward_horizon} periods ({forward_horizon_config} days)")
+        else:
+            forward_horizon = forward_horizon_config
+            logger.info(f"AM/PM data detected: Using forward_horizon={forward_horizon} periods (already in periods)")
+    else:
+        # For daily data: use as-is
+        forward_horizon = forward_horizon_config
+        logger.info(f"Daily data detected: Using forward_horizon={forward_horizon} days")
+
     target = Ref(close, -forward_horizon) / close - 1
     # Create output directory
     output_dir = Path(config['output']['base_dir']) / window_name
@@ -804,6 +849,9 @@ def train_single_window(
         # Create calculator
         calculator = QLibStockDataCalculator(data, target)
 
+        # FIX 2: Add use_icir switch to control reward function
+        use_icir = reward_config.get('use_icir', False)  # Default False = use IC only (like original alphagen)
+
         pool = CustomRewardAlphaPool(
             capacity=training_config['pool_capacity_per_window'],
             calculator=calculator,
@@ -813,8 +861,12 @@ def train_single_window(
             turnover_rebalance_horizon=turnover_rebalance_horizon,
             turnover_top_k=turnover_top_k,
             turnover_top_k_ratio=turnover_top_k_ratio,
+            use_icir=use_icir,  # FIX 2: Configurable ICIR switch
             device=device
         )
+
+        # Log reward configuration
+        logger.info(f"Reward configuration: use_icir={use_icir}, turnover_penalty_coeff={turnover_penalty_coeff}")
 
         # Prepare precomputed feature subexpressions
         subexpr_config = stage1_config.get('precomputed_features', {})
@@ -846,7 +898,7 @@ def train_single_window(
             gamma=ppo_config['gamma'],
             ent_coef=ppo_config['entropy_coef'],
             vf_coef=ppo_config['value_loss_coef'],
-            verbose=0,  # Set to 0 to avoid colorama conflicts on Windows
+            verbose=1,  # FIX 1: Set to 1 to show training progress in terminal (like original alphagen)
             tensorboard_log=str(output_dir / 'tensorboard_stage1')
         )
 
@@ -858,10 +910,23 @@ def train_single_window(
             python_logger=logger
         )
 
-        # Train
-        max_steps = stage1_config['max_episodes'] * 200  # Approximate steps per episode
-        logger.info(f"Training Stage 1 for up to {stage1_config['max_episodes']} episodes...")
-        model.learn(total_timesteps=max_steps, callback=callback)
+        # FIX 3: Use total_steps directly instead of max_episodes (like original alphagen)
+        # Original alphagen uses 250k steps for pool capacity 20
+        if 'total_steps' in stage1_config:
+            # Use total_steps directly (recommended)
+            total_steps = stage1_config['total_steps']
+            logger.info(f"Training Stage 1 for {total_steps} steps...")
+        elif 'max_episodes' in stage1_config:
+            # Fallback: convert episodes to steps (assuming ~15 steps per episode)
+            max_episodes = stage1_config['max_episodes']
+            total_steps = max_episodes * 15  # More accurate estimate than 200
+            logger.info(f"Training Stage 1 for up to {max_episodes} episodes (~{total_steps} steps)...")
+        else:
+            # Default fallback
+            total_steps = 250000  # Match original alphagen default
+            logger.info(f"Training Stage 1 with default {total_steps} steps...")
+
+        model.learn(total_timesteps=total_steps, callback=callback)
 
         # Save stage 1 results
         stage1_pool = pool.to_json_dict()
@@ -1057,7 +1122,21 @@ def merge_and_optimize_ensemble(
 
     # Create target
     close = Feature(FeatureType.CLOSE)
-    forward_horizon = max(1, int(data_context.forward_horizon))
+
+    # FIX 4: Use same forward_horizon adjustment logic as in training
+    forward_horizon_config = max(1, int(data_context.forward_horizon))
+
+    # Detect data frequency
+    data_freq = 'daily'
+    if hasattr(data_context.stock_data, '_data') and hasattr(data_context.stock_data._data, 'index'):
+        if 'session' in data_context.stock_data._data.columns:
+            data_freq = 'ampm'
+
+    if data_freq == 'ampm' and forward_horizon_config < 30:
+        forward_horizon = forward_horizon_config * 2  # Convert days to periods
+    else:
+        forward_horizon = forward_horizon_config
+
     target = Ref(close, -forward_horizon) / close - 1
     validation_calc = QLibStockDataCalculator(validation_data, target)
 

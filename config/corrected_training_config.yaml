@@ -1,0 +1,172 @@
+# Training Configuration - Fixed Based on Detailed Analysis
+# This config addresses all 4 issues identified:
+# 1. ✅ Terminal output enabled (verbose=1 + print statements)
+# 2. ✅ Reward function configurable (use_icir switch, default False = IC only)
+# 3. ✅ Uses total_steps instead of max_episodes
+# 4. ✅ Correct forward_horizon for AM/PM data (auto-adjusted)
+
+# ============================================================================
+# TIME WINDOWS
+# ============================================================================
+time_windows:
+  train_12m:
+    name: "12m"
+    start_date: "2024-11-01"  # ~12 month training lookback
+    end_date: "2025-10-31"
+    description: "Primary 12-month training window"
+
+  train_6m:
+    name: "6m"
+    start_date: "2025-05-01"  # ~6 month training lookback
+    end_date: "2025-10-31"
+    description: "Secondary 6-month training window"
+
+  train_3m:
+    name: "3m"
+    start_date: "2025-08-01"  # ~3 month training lookback
+    end_date: "2025-10-31"
+    description: "Tactical 3-month training window"
+
+  validation:
+    start_date: "2025-07-01"
+    end_date: "2025-10-31"
+    description: "Recent validation period"
+
+# ============================================================================
+# UNIVERSE CONFIGURATION
+# ============================================================================
+universe:
+  base_instrument: "csi300"
+  additional_stocks:
+    - "AAPL"
+    - "GOOGL"
+    - "AMZN"
+    - "NVDA"
+  fingerprint_file: "output/corrected_universe_fingerprint.json"
+
+# ============================================================================
+# TRAINING CONFIGURATION - All Fixes Applied
+# ============================================================================
+training:
+  stage1_technical:
+    enabled: true
+
+    # FIX 3: Use total_steps directly (like original alphagen)
+    # Original uses 250k steps for pool capacity 20
+    total_steps: 250000  # Directly specify steps, not episodes
+
+    # Backup: If total_steps not available, can use max_episodes
+    # max_episodes: 16000  # 250k / 15 ≈ 16k episodes
+
+    early_stopping_patience: 100
+    target_candidates: 20
+
+  # PPO hyperparameters - Match original
+  ppo:
+    learning_rate: 0.0001
+    gamma: 1.0  # Original uses 1.0
+    gae_lambda: 0.95
+    clip_epsilon: 0.2
+    entropy_coef: 0.01
+    value_loss_coef: 0.5
+    batch_size: 128
+
+  # FIX 2: Reward configuration with switches (like original alphagen)
+  reward:
+    # Set use_icir=False to use IC only (like original MseAlphaPool)
+    # Set use_icir=True to add ICIR component
+    use_icir: false  # Default: False (use IC only, like original)
+
+    # Set turnover_penalty_coeff=0 to disable turnover penalty
+    # Set turnover_penalty_coeff>0 to enable penalty
+    turnover_penalty_coeff: 0.0  # Default: 0 (disabled, like original)
+
+    # Turnover penalty parameters (only used if turnover_penalty_coeff > 0)
+    turnover_rebalance_horizon: 22
+    turnover_top_k_ratio: 0.1
+
+  pool_capacity_per_window: 20
+  device: "cuda:0"
+
+# ============================================================================
+# DATA CONFIGURATION
+# ============================================================================
+data:
+  source: "feature_store"  # or "merged" or "qlib"
+
+  # FIX 4: Forward horizon configuration
+  # For daily data: use 20 (predicts 20 days)
+  # For AM/PM data: use 20 (will auto-adjust to 40 periods = 20 days)
+  forward_horizon: 20  # In trading days (auto-adjusted for AM/PM data)
+
+# ============================================================================
+# ENSEMBLE CONFIGURATION
+# ============================================================================
+ensemble:
+  final_capacity: 30
+  auto_prune_weak_factors: true
+
+  optimizer:
+    learning_rate: 0.0005
+    max_steps: 10000
+    tolerance: 500
+    l1_alpha: 0.005
+
+  cross_validation:
+    enabled: true
+    n_folds: 3
+    shrinkage_factor: 0.9
+
+  ic_lower_bound: 0.01
+
+# ============================================================================
+# OUTPUT CONFIGURATION
+# ============================================================================
+output:
+  base_dir: "output/corrected_training"
+  pool_12m: "output/corrected_training/pool_12m.json"
+  pool_6m: "output/corrected_training/pool_6m.json"
+  pool_3m: "output/corrected_training/pool_3m.json"
+  final_ensemble: "output/corrected_training/ensemble_pool.json"
+  training_log: "output/corrected_training/training.log"
+  performance_report: "output/corrected_training/report.txt"
+  save_detailed_metrics: true
+  metrics_file: "output/corrected_training/metrics.json"
+
+# ============================================================================
+# CACHE MANAGEMENT
+# ============================================================================
+cache:
+  enabled: false
+  freshness_days: 30
+  check_universe_consistency: true
+  cache_dir: "output/cache_corrected"
+  skip_training_if_cached: false
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  console_output: true
+  file_output: true
+
+# ============================================================================
+# NOTES ON CONFIGURATION
+# ============================================================================
+#
+# This configuration matches original alphagen behavior:
+# 1. Uses IC only as reward (no ICIR, no turnover penalty)
+# 2. Trains for 250k steps (same as original for pool capacity 20)
+# 3. Predicts 20 trading days forward (auto-adjusted for data frequency)
+# 4. Terminal shows real-time progress (verbose=1 + print statements)
+#
+# To enable advanced features:
+# - Set use_icir: true to add ICIR component to reward
+# - Set turnover_penalty_coeff: 0.05 to add turnover penalty
+#
+# Expected performance:
+# - Best IC: 0.05+ (depending on market conditions)
+# - Stable training progress visible in terminal
+# - TensorBoard logs available in output/corrected_training/tensorboard_stage1/

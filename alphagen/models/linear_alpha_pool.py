@@ -546,10 +546,11 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
         ic_lower_bound: Optional[float] = None,
         l1_alpha: float = 5e-3,
         lcb_beta: Optional[float] = None,
-        turnover_penalty_coeff: float = 0.1, # New parameter
+        turnover_penalty_coeff: float = 0.0,  # FIX 2: Default 0 (disabled) like original
         turnover_rebalance_horizon: Optional[int] = None,
         turnover_top_k: Optional[int] = None,
         turnover_top_k_ratio: float = 0.1,
+        use_icir: bool = False,  # FIX 2: Add switch for ICIR (default False = use IC only)
         device: torch.device = torch.device("cpu")
     ):
         super().__init__(capacity, calculator, ic_lower_bound, l1_alpha, lcb_beta, device)
@@ -557,6 +558,7 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
         self.turnover_rebalance_horizon = max(1, int(turnover_rebalance_horizon)) if turnover_rebalance_horizon else 1
         self.turnover_top_k = turnover_top_k
         self.turnover_top_k_ratio = turnover_top_k_ratio
+        self.use_icir = use_icir  # FIX 2: Switch for ICIR
 
     def _compute_selection_turnover(self, weighted_alpha: torch.Tensor) -> float:
         horizon = max(1, int(self.turnover_rebalance_horizon))
@@ -615,14 +617,24 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
         return float(sum(turnover_samples) / len(turnover_samples))
 
     def _calc_main_objective(self) -> Optional[float]:
+        """
+        FIX 2: Configurable reward function with switches.
+        - If use_icir=False and turnover_penalty_coeff=0: Returns None (uses default IC, like original MseAlphaPool)
+        - If use_icir=True: Adds ICIR component
+        - If turnover_penalty_coeff>0: Subtracts turnover penalty
+        """
         if self.size == 0:
             return None
+
+        # FIX 2: If both switches are disabled, use default IC (like original alphagen)
+        if not self.use_icir and self.turnover_penalty_coeff <= 0:
+            return None  # Fall back to default ensemble IC
 
         try:
             alpha_values = torch.stack(self._extra_info[:self.size])
             weights = torch.tensor(self.weights, device=self.device)
 
-            # Calculate Ensemble IC and ICIR from weighted alpha
+            # Calculate Ensemble IC
             target_value = self.calculator.target
             weighted_alpha = (weights[:, None, None] * alpha_values).sum(dim=0)
             ics = batch_pearsonr(weighted_alpha, target_value)
@@ -635,29 +647,35 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
             if not math.isfinite(ensemble_ic):
                 return None
 
-            ic_mean = ics.mean()
-            ic_std = ics.std()
+            # Start with IC as base objective
+            final_objective = ensemble_ic
 
-            # If std is too small or NaN, we can't calculate ICIR reliably
-            if torch.isnan(ic_std) or ic_std.item() < 1e-6:
-                ensemble_icir = 0.0
-            else:
-                ensemble_icir = (ic_mean / ic_std).item()
-                if not math.isfinite(ensemble_icir):
+            # FIX 2: Optionally add ICIR component
+            ensemble_icir = 0.0
+            if self.use_icir:
+                ic_mean = ics.mean()
+                ic_std = ics.std()
+
+                # If std is too small or NaN, we can't calculate ICIR reliably
+                if torch.isnan(ic_std) or ic_std.item() < 1e-6:
                     ensemble_icir = 0.0
+                else:
+                    ensemble_icir = (ic_mean / ic_std).item()
+                    if not math.isfinite(ensemble_icir):
+                        ensemble_icir = 0.0
 
-            # Calculate Turnover Penalty for the ensemble
+                final_objective += ensemble_icir
+
+            # FIX 2: Optionally add turnover penalty
             turnover = 0.0
             turnover_penalty = 0.0
             if self.turnover_penalty_coeff > 0 and weighted_alpha.shape[0] > 1:
                 turnover = self._compute_selection_turnover(weighted_alpha)
                 if math.isfinite(turnover):
                     turnover_penalty = self.turnover_penalty_coeff * turnover
+                    final_objective -= turnover_penalty
                 else:
                     turnover = 0.0
-
-            # Combine them
-            final_objective = ensemble_ic + ensemble_icir - turnover_penalty
 
             # Store components for debugging
             if not hasattr(self, '_objective_components'):
