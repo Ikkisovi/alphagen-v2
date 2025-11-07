@@ -547,10 +547,72 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
         l1_alpha: float = 5e-3,
         lcb_beta: Optional[float] = None,
         turnover_penalty_coeff: float = 0.1, # New parameter
+        turnover_rebalance_horizon: Optional[int] = None,
+        turnover_top_k: Optional[int] = None,
+        turnover_top_k_ratio: float = 0.1,
         device: torch.device = torch.device("cpu")
     ):
         super().__init__(capacity, calculator, ic_lower_bound, l1_alpha, lcb_beta, device)
         self.turnover_penalty_coeff = turnover_penalty_coeff
+        self.turnover_rebalance_horizon = max(1, int(turnover_rebalance_horizon)) if turnover_rebalance_horizon else 1
+        self.turnover_top_k = turnover_top_k
+        self.turnover_top_k_ratio = turnover_top_k_ratio
+
+    def _compute_selection_turnover(self, weighted_alpha: torch.Tensor) -> float:
+        horizon = max(1, int(self.turnover_rebalance_horizon))
+        periods, num_assets = weighted_alpha.shape
+
+        if periods <= horizon or num_assets == 0:
+            return 0.0
+
+        if self.turnover_top_k is not None and self.turnover_top_k > 0:
+            top_k = min(self.turnover_top_k, num_assets)
+        else:
+            ratio = self.turnover_top_k_ratio if self.turnover_top_k_ratio > 0 else 0.1
+            top_k = max(1, min(num_assets, int(round(num_assets * ratio))))
+
+        if top_k == 0:
+            return 0.0
+
+        turnover_samples: List[float] = []
+        fill_value = torch.full(
+            (num_assets,),
+            torch.finfo(weighted_alpha.dtype).min,
+            device=self.device,
+            dtype=weighted_alpha.dtype,
+        )
+
+        for start in range(0, periods - horizon, horizon):
+            current_scores = weighted_alpha[start]
+            future_scores = weighted_alpha[start + horizon]
+
+            current_valid = ~torch.isnan(current_scores)
+            future_valid = ~torch.isnan(future_scores)
+
+            # Skip if we do not have any valid scores in either snapshot
+            if not current_valid.any() or not future_valid.any():
+                continue
+
+            effective_k = min(top_k, int(current_valid.sum().item()), int(future_valid.sum().item()))
+            if effective_k == 0:
+                continue
+
+            current_filled = torch.where(current_valid, current_scores, fill_value)
+            future_filled = torch.where(future_valid, future_scores, fill_value)
+
+            current_indices = torch.topk(current_filled, k=effective_k, largest=True).indices.detach().cpu().tolist()
+            future_indices = torch.topk(future_filled, k=effective_k, largest=True).indices.detach().cpu().tolist()
+
+            current_set = set(current_indices)
+            future_set = set(future_indices)
+
+            intersection = len(current_set & future_set)
+            turnover_samples.append(1.0 - intersection / float(effective_k))
+
+        if not turnover_samples:
+            return 0.0
+
+        return float(sum(turnover_samples) / len(turnover_samples))
 
     def _calc_main_objective(self) -> Optional[float]:
         if self.size == 0:
@@ -585,17 +647,14 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
                     ensemble_icir = 0.0
 
             # Calculate Turnover Penalty for the ensemble
+            turnover = 0.0
             turnover_penalty = 0.0
             if self.turnover_penalty_coeff > 0 and weighted_alpha.shape[0] > 1:
-                # Calculate day-over-day correlation for the weighted alpha values
-                valid_mask = ~torch.isnan(weighted_alpha)
-                valid_values = torch.where(valid_mask, weighted_alpha, torch.tensor(0.0, device=self.device))
-
-                daily_corr = batch_pearsonr(valid_values[:-1], valid_values[1:]).mean().item()
-                if math.isfinite(daily_corr):
-                    # Turnover is 1 - correlation.
-                    turnover = 1.0 - daily_corr
+                turnover = self._compute_selection_turnover(weighted_alpha)
+                if math.isfinite(turnover):
                     turnover_penalty = self.turnover_penalty_coeff * turnover
+                else:
+                    turnover = 0.0
 
             # Combine them
             final_objective = ensemble_ic + ensemble_icir - turnover_penalty
@@ -606,6 +665,7 @@ class CustomRewardAlphaPool(MeanStdAlphaPool):
             self._objective_components.append({
                 'ic': ensemble_ic,
                 'icir': ensemble_icir,
+                'turnover': turnover,
                 'turnover_penalty': turnover_penalty,
                 'final': final_objective
             })

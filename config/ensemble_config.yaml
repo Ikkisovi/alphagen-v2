@@ -5,7 +5,8 @@
 # TIME WINDOWS
 # ============================================================================
 time_windows:
-  # Training windows (aligned to trading calendar)
+  # Training windows (aligned to trading calendar). Set `reward:` inside any
+  # window block to override the global turnover penalty settings.
   train_12m:
     name: "12m"
     start_date: "2023-01-01"
@@ -23,6 +24,8 @@ time_windows:
     start_date: "2023-10-01"
     end_date: "2023-12-31"
     description: "3-month short-term window"
+    # reward:
+    #   turnover_penalty_coeff: 0.02  # Example per-window override
 
   # Validation window for final ensemble optimization
   validation:
@@ -66,11 +69,15 @@ data:
     - close
     - volume
     - vwap
-    - return
+    - "return*"
+    - "ret_*"
+    - "rel_ret_*"
     - "TE_*"
     - "CORR_*"
   derived_feature_patterns:
-    - return
+    - "return*"
+    - "ret_*"
+    - "rel_ret_*"
     - "TE_*"
     - "CORR_*"
   preload:
@@ -100,26 +107,16 @@ universe:
 # TRAINING CONFIGURATION
 # ============================================================================
 training:
-  # Dual-stage training approach
+  # Single-stage technical training
   stage1_technical:
     enabled: true
     max_episodes: 500
     min_episodes: 400
     early_stopping_patience: 30  # Stop after 30 flat episodes
     target_candidates: 80        # Target ~80 candidate factors
-    use_fundamentals: false
-
-  stage2_fundamentals:
-    enabled: false  # Disabled - using single stage training
-    max_episodes: 500
-    min_episodes: 400
-    early_stopping_patience: 30
-    top_quartile_only: true      # Use top 25% from stage 1
-    target_factors_per_window: 20 # Prune to ~20 final factors
-    use_fundamentals: true
 
   # Pool configuration per window
-  pool_capacity_per_window: 25   # Capacity for each training window
+  pool_capacity_per_window: 25
 
   # PPO/RL hyperparameters
   ppo:
@@ -130,45 +127,16 @@ training:
     entropy_coef: 0.01
     value_loss_coef: 0.5
 
+  reward:
+    # Configure turnover penalty parameters globally; individual windows can
+    # override these values via time_windows.<window>.reward if needed.
+    objective: "IC + ICIR - turnover_penalty"
+    turnover_penalty_coeff: 0.05
+    turnover_rebalance_horizon: 20
+    turnover_top_k_ratio: 0.1
+
   # Device configuration
   device: "cuda:0"  # Use GPU if available, fallback to CPU
-
-# ============================================================================
-# FUNDAMENTAL FEATURES
-# ============================================================================
-fundamental_features:
-  # Valuation ratios
-  - "PERatio"          # Price-to-Earnings
-  - "PBRatio"          # Price-to-Book
-  - "PSRatio"          # Price-to-Sales
-  - "EVToEBITDA"       # Enterprise Value to EBITDA
-  - "EVToRevenue"      # Enterprise Value to Revenue
-  - "EVToFCF"          # Enterprise Value to Free Cash Flow
-
-  # Yield metrics
-  - "EarningYield"     # Earnings Yield (inverse of P/E)
-  - "FCFYield"         # Free Cash Flow Yield
-  - "SalesYield"       # Sales Yield (inverse of P/S)
-  - "DividendYield"    # Dividend Yield
-
-  # Growth metrics
-  - "RevenueGrowth"    # Revenue growth rate
-  - "EarningsGrowth"   # Earnings growth rate
-  - "BookValueGrowth"  # Book value growth rate
-
-  # Financial health
-  - "DebtToAssets"     # Debt to Assets ratio
-  - "DebtToEquity"     # Debt to Equity ratio
-  - "CurrentRatio"     # Current Ratio (liquidity)
-  - "QuickRatio"       # Quick Ratio
-
-  # Profitability
-  - "ROE"              # Return on Equity
-  - "ROA"              # Return on Assets
-  - "ROIC"             # Return on Invested Capital
-  - "GrossMargin"      # Gross Profit Margin
-  - "OperatingMargin"  # Operating Profit Margin
-  - "NetMargin"        # Net Profit Margin
 
 # ============================================================================
 # ENSEMBLE CONFIGURATION

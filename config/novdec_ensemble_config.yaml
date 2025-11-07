@@ -34,11 +34,31 @@ data:
     - VWAP
     - MARKET_CAP
     - TURNOVER
+  feature_patterns:
+    - "open"
+    - "high"
+    - "low"
+    - "close"
+    - "volume"
+    - "vwap"
+    - "return*"
+    - "ret_*"
+    - "rel_ret_*"
+    - "TE_*"
+    - "CORR_*"
+  derived_feature_patterns:
+    - "return*"
+    - "ret_*"
+    - "rel_ret_*"
+    - "TE_*"
+    - "CORR_*"
 
 # ============================================================================
 # TIME WINDOWS
 # ============================================================================
 time_windows:
+  # Training windows. Add an optional `reward:` section to override the global
+  # turnover penalty for a specific period if desired.
   train_12m:
     name: "12m"
     start_date: "2024-11-01"
@@ -56,6 +76,8 @@ time_windows:
     start_date: "2025-08-01"
     end_date: "2025-10-31"
     description: "3-month short-term window ending Oct 2025"
+    # reward:
+    #   turnover_penalty_coeff: 0.04  # Example override for this window
 
   validation:
     start_date: "2025-09-01"
@@ -80,22 +102,10 @@ training:
     min_episodes: 150
     early_stopping_patience: 25
     target_candidates: 70
-    use_fundamentals: false
-    load_fundamentals_for_scaling: false
     precomputed_features:
       enabled: false
 
-  stage2_fundamentals:
-    enabled: false
-    max_episodes: 150
-    min_episodes: 100
-    early_stopping_patience: 25
-    top_quartile_only: true
-    target_factors_per_window: 14
-    use_fundamentals: true
-
   pool_capacity_per_window: 30
-  turnover_penalty_coeff: 0.1
 
   ppo:
     learning_rate: 0.00015
@@ -105,30 +115,15 @@ training:
     entropy_coef: 0.01
     value_loss_coef: 0.5
 
+  reward:
+    # Configure turnover penalty globally; windows can override via
+    # time_windows.<window>.reward in this config if needed.
+    objective: "IC + ICIR - turnover_penalty"
+    turnover_penalty_coeff: 0.05
+    turnover_rebalance_horizon: 22
+    turnover_top_k_ratio: 0.1
+
   device: "cpu"   # Default to CPU; switch to cuda:* when available
-
-# ============================================================================
-# FUNDAMENTAL FEATURES (Stage 2)
-# ============================================================================
-fundamental_features:
-  # Valuation ratios
-  - "PERatio"
-  - "PBRatio"
-  - "PSRatio"
-  - "EVToEBITDA"
-  - "EVToRevenue"
-  - "EVToFCF"
-
-  # Yield metrics
-  - "EarningYield"
-  - "FCFYield"
-  - "SalesYield"
-  - "DividendYield"
-
-  # Forward-looking & market metrics
-  - "ForwardPeRatio"
-  - "SharesOutstanding"
-
 
 # ============================================================================
 # ENSEMBLE SETTINGS
@@ -167,7 +162,6 @@ output:
   base_dir: "output/novdec2025_ensemble"
   save_stage_pool: true
   stage1_pool: "output/novdec2025_ensemble/{window_name}_stage1_pool.json"
-  stage2_pool: "output/novdec2025_ensemble/{window_name}_stage2_pool.json"
   pool_12m: "output/novdec2025_ensemble/pool_12m.json"
   pool_6m: "output/novdec2025_ensemble/pool_6m.json"
   pool_3m: "output/novdec2025_ensemble/pool_3m.json"
