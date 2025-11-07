@@ -25,22 +25,11 @@ class LocalDataConfig:
     max_future_days: int = 40
     features: Sequence[FeatureType] = (
         FeatureType.OPEN,
-        FeatureType.CLOSE,
         FeatureType.HIGH,
         FeatureType.LOW,
+        FeatureType.CLOSE,
         FeatureType.VOLUME,
         FeatureType.VWAP,
-        FeatureType.PE_RATIO,
-        FeatureType.PB_RATIO,
-        FeatureType.PS_RATIO,
-        FeatureType.EV_TO_EBITDA,
-        FeatureType.EV_TO_REVENUE,
-        FeatureType.EV_TO_FCF,
-        FeatureType.EARNINGS_YIELD,
-        FeatureType.FCF_YIELD,
-        FeatureType.SALES_YIELD,
-        FeatureType.FORWARD_PE_RATIO,
-        FeatureType.SHARES_OUTSTANDING,
         FeatureType.MARKET_CAP,
         FeatureType.TURNOVER,
     )
@@ -96,72 +85,6 @@ def _aggregate_to_daily(df: pd.DataFrame) -> pd.DataFrame:
     daily = daily.drop(columns=["pv"]).reset_index()
     daily["date"] = pd.to_datetime(daily["date"])
     return daily
-
-
-def _load_fundamental_table(path: Path) -> pd.DataFrame:
-    """Load the preprocessed fundamental table from disk."""
-    path = path.expanduser().resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"Fundamental dataset not found: {path}")
-
-    if path.suffix.lower() in (".parquet", ".pq"):
-        table = pd.read_parquet(path)
-    else:
-        table = pd.read_csv(path)
-
-    table["date"] = pd.to_datetime(table["date"])
-    table["symbol"] = table["symbol"].astype(str)
-    return table
-
-
-def _attach_fundamentals(
-    daily: pd.DataFrame,
-    cfg: LocalDataConfig,
-    column_map: Mapping[FeatureType, str],
-) -> pd.DataFrame:
-    """
-    Merge the fundamental dataset (if configured) into the aggregated OHLC data.
-    """
-    if cfg.fundamental_path is None:
-        return daily
-
-    fundamentals = _load_fundamental_table(cfg.fundamental_path)
-    required_cols = {
-        column_map[f]
-        for f in cfg.features
-        if f in column_map and column_map[f] not in {"open", "high", "low", "close", "volume", "vwap"}
-    }
-    if FeatureType.MARKET_CAP in cfg.features or FeatureType.TURNOVER in cfg.features:
-        required_cols.add("shares_outstanding")
-
-    if not required_cols:
-        return daily
-
-    merge_cols = ["date", "symbol"] + sorted(required_cols.intersection(fundamentals.columns))
-    merged = daily.merge(
-        fundamentals[merge_cols],
-        on=["date", "symbol"],
-        how="left",
-    ).sort_values(["symbol", "date"])
-
-    for col in merge_cols:
-        if col in {"date", "symbol"}:
-            continue
-        merged[col] = merged.groupby("symbol")[col].ffill().bfill()
-
-    if "shares_outstanding" in merged.columns:
-        if "market_cap" in column_map.values():
-            merged["market_cap"] = merged["close"] * merged["shares_outstanding"]
-        if "turnover" in column_map.values():
-            denom = merged["shares_outstanding"].replace({0: np.nan})
-            merged["turnover"] = merged["volume"] / denom
-    else:
-        if "market_cap" in column_map.values() and "market_cap" not in merged.columns:
-            merged["market_cap"] = np.nan
-        if "turnover" in column_map.values() and "turnover" not in merged.columns:
-            merged["turnover"] = np.nan
-
-    return merged
 
 
 def _build_extended_dates(

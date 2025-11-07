@@ -49,26 +49,12 @@ universe:
 # TRAINING CONFIGURATION (Test Mode - Reduced Episodes)
 # ============================================================================
 training:
-  # Dual-stage training approach
   stage1_technical:
     enabled: true
     max_episodes: 100      # Reduced for quick test
     min_episodes: 50
     early_stopping_patience: 15
     target_candidates: 40   # Reduced for test
-    use_fundamentals: false
-
-  stage2_fundamentals:
-    enabled: true
-    max_episodes: 100      # Reduced for quick test
-    min_episodes: 50
-    early_stopping_patience: 15
-    top_quartile_only: true
-    target_factors_per_window: 15  # Reduced for test
-    use_fundamentals: true
-
-  # Pool configuration per window
-  pool_capacity_per_window: 20   # Reduced for test
 
   # PPO/RL hyperparameters
   ppo:
@@ -79,25 +65,15 @@ training:
     entropy_coef: 0.01
     value_loss_coef: 0.5
 
+  reward:
+    objective: "IC + ICIR - turnover_penalty"
+    turnover_penalty_coeff: 0.05
+
+  # Pool configuration per window
+  pool_capacity_per_window: 20   # Reduced for test
+
   # Device configuration
   device: "cuda:0"
-
-# ============================================================================
-# FUNDAMENTAL FEATURES
-# ============================================================================
-fundamental_features:
-  # Valuation ratios
-  - "PERatio"
-  - "PBRatio"
-  - "PSRatio"
-  - "EVToEBITDA"
-  - "EVToRevenue"
-  - "EVToFCF"
-
-  # Yield metrics
-  - "EarningYield"
-  - "FCFYield"
-  - "SalesYield"
 
 # ============================================================================
 # ENSEMBLE CONFIGURATION
