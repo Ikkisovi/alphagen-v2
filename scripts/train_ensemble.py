@@ -4,10 +4,10 @@ Ensemble Alpha Mining Script
 
 This script orchestrates multi-window ensemble factor training:
 1. Trains factors on 12M, 6M, and 3M historical windows
-2. Uses dual-stage training (technical → technical+fundamentals)
-3. Merges all discovered factors into a single ensemble
-4. Optimizes final weights on validation period
-5. Supports intelligent caching to avoid redundant training
+2. Uses a single-stage price feature sweep (with market_cap & turnover support)
+3. Streams training progress to TensorBoard and console every 2000 steps
+4. Merges all discovered factors into a single ensemble
+5. Optimizes final weights on a validation period and caches outputs
 
 Usage:
     python -m scripts.train_ensemble--config-file  config/novdec_ensemble_config.yaml 
@@ -19,9 +19,8 @@ import json
 import os
 import logging
 import hashlib
-import math
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional, Any, Sequence, Set
+from typing import List, Dict, Tuple, Optional, Any, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 import yaml
@@ -346,238 +345,12 @@ def build_precomputed_feature_subexprs(
     return subexprs
 
 
-def get_fundamental_feature_types(data_context: DataContext) -> List[FeatureType]:
-    """Return feature types that correspond to fundamentals (non-price)."""
-    features = tuple(data_context.features) if data_context.features else tuple(FeatureType)
-    price_set = set(data_context.price_features or ())
-    return [feature for feature in features if feature not in price_set]
-
-
-def build_fundamental_combo(
-    expr_str: str,
-    feature_type: FeatureType,
-    op: str,
-    parser: ExpressionParser,
-) -> Expression:
-    """Construct a new expression combining base expression with a fundamental feature."""
-    base_expr = parser.parse(expr_str)
-    feature_expr = Feature(feature_type)
-
-    if op == 'div':
-        return Div(base_expr, feature_expr)
-    if op == 'mul':
-        return Mul(base_expr, feature_expr)
-    if op == 'add':
-        return Add(base_expr, feature_expr)
-    if op == 'sub':
-        return Sub(base_expr, feature_expr)
-    if op in ('log_div', 'log_ratio'):
-        return Log(Div(base_expr, feature_expr))
-    if op == 'log_mul':
-        return Log(Mul(base_expr, feature_expr))
-    if op == 'ratio_abs':
-        return Abs(Div(base_expr, feature_expr))
-
-    raise ValueError(f"Unsupported fundamental combo operation: {op}")
-
-
-def generate_fundamental_combos(
-    base_exprs: Sequence[str],
-    fundamental_features: Sequence[FeatureType],
-    combo_config: Dict[str, Any],
-    logger: logging.Logger,
-) -> List[str]:
-    """Create augmented expressions by combining base factors with fundamentals."""
-    if not base_exprs or not fundamental_features:
-        return []
-
-    operations = combo_config.get('operations', ['div', 'log_div'])
-    top_k = combo_config.get('top_k', 10)
-    max_new = combo_config.get('max_new', 50)
-
-    parser = ExpressionParser(Operators)
-    selected_exprs = list(base_exprs[:top_k]) if top_k is not None else list(base_exprs)
-
-    augmented: List[str] = []
-    seen: Set[str] = set(base_exprs)
-
-    for expr_str in selected_exprs:
-        for feature_type in fundamental_features:
-            for op in operations:
-                if len(augmented) >= max_new:
-                    break
-                try:
-                    new_expr = build_fundamental_combo(expr_str, feature_type, op, parser)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.debug(f"Skipping combo (expr={expr_str}, feature={feature_type}, op={op}): {exc}")
-                    continue
-                new_expr_str = str(new_expr)
-                if new_expr_str in seen:
-                    continue
-                augmented.append(new_expr_str)
-                seen.add(new_expr_str)
-            if len(augmented) >= max_new:
-                break
-        if len(augmented) >= max_new:
-            break
-
-    return augmented
-
-
-def build_price_fundamental_subexprs(
-    price_features: Sequence[FeatureType],
-    fundamental_features: Sequence[FeatureType],
-    subexpr_config: Dict[str, Any],
-    logger: logging.Logger,
-) -> List[Expression]:
-    """Pre-build price/fundamental combinations for Stage 1 exploration."""
-    combos: List[Expression] = []
-    seen: Set[str] = set()
-
-    parser = ExpressionParser(Operators)
-    custom_specs = subexpr_config.get('custom', [])
-
-    for spec in custom_specs:
-        try:
-            expr_str = spec['expression']
-        except KeyError:
-            logger.warning(f"Skipping custom subexpression without 'expression': {spec}")
-            continue
-        name = spec.get('name', expr_str)
-        try:
-            parsed = parser.parse(expr_str)
-        except Exception as exc:
-            logger.warning(f"Failed to parse custom subexpression '{expr_str}': {exc}")
-            continue
-        expr = DerivedFeatureExpression(parsed, name)
-        if name in seen:
-            logger.debug(f"Duplicate custom subexpression name '{name}' skipped")
-            continue
-        seen.add(name)
-        combos.append(expr)
-
-    return combos
-
-
-def apply_stage1_fundamental_combos(
-    pool: MseAlphaPool,
-    combo_config: Dict[str, Any],
-    data_context: DataContext,
-    ensemble_config: Dict[str, Any],
-    device: torch.device,
-    logger: logging.Logger,
-) -> MseAlphaPool:
-    """Optionally replace stage 1 expressions with improved fundamental combos."""
-    if not combo_config.get('enabled', True):
-        return pool
-
-    fundamental_features = get_fundamental_feature_types(data_context)
-    if not fundamental_features:
-        logger.info("Stage 1 combo augmentation skipped: no fundamental features available")
-        return pool
-
-    operations = combo_config.get('operations', ['div', 'log_div'])
-    max_trials = int(combo_config.get('max_trials_per_factor', 6))
-    min_improvement = float(combo_config.get('min_ic_improvement', 0.0))
-
-    parser = ExpressionParser(Operators)
-    base_exprs = pool.to_json_dict()['exprs'][:pool.size]
-
-    if not base_exprs:
-        return pool
-
-    replacements = 0
-    ic_gains: List[float] = []
-    new_expr_strings: List[str] = []
-
-    for expr_str in base_exprs:
-        try:
-            base_expr = parser.parse(expr_str)
-            base_ic = pool.calculator.calc_single_IC_ret(base_expr)
-        except Exception as exc:
-            logger.debug(f"Failed to evaluate base expression {expr_str}: {exc}")
-            new_expr_strings.append(expr_str)
-            continue
-
-        best_expr_str = expr_str
-        best_ic = base_ic
-        trials = 0
-
-        for feature in fundamental_features:
-            for op in operations:
-                if trials >= max_trials:
-                    break
-                try:
-                    candidate_expr = build_fundamental_combo(expr_str, feature, op, parser)
-                except Exception as exc:
-                    logger.debug(
-                        f"Skipping combo for {expr_str} with feature {feature} op {op}: {exc}"
-                    )
-                    continue
-                trials += 1
-                candidate_str = str(candidate_expr)
-                if candidate_str == expr_str:
-                    continue
-                try:
-                    candidate_ic = pool.calculator.calc_single_IC_ret(candidate_expr)
-                except Exception as exc:
-                    logger.debug(f"Failed to evaluate combo {candidate_str}: {exc}")
-                    continue
-                if math.isnan(candidate_ic):
-                    continue
-                if candidate_ic > best_ic + min_improvement:
-                    best_ic = candidate_ic
-                    best_expr_str = candidate_str
-            if trials >= max_trials:
-                break
-
-        new_expr_strings.append(best_expr_str)
-        if best_expr_str != expr_str:
-            replacements += 1
-            ic_gains.append(best_ic - base_ic)
-
-    if replacements == 0:
-        logger.info("Stage 1 combo augmentation found no improvements over price-only expressions")
-        return pool
-
-    avg_gain = float(np.mean(ic_gains)) if ic_gains else 0.0
-    logger.info(
-        "Stage 1 combo augmentation replaced %d/%d factors (avg IC gain %.4f)",
-        replacements,
-        len(base_exprs),
-        avg_gain,
-    )
-
-    new_pool = MseAlphaPool(
-        capacity=pool.capacity,
-        calculator=pool.calculator,
-        ic_lower_bound=ensemble_config.get('ic_lower_bound', 0.01),
-        l1_alpha=ensemble_config['optimizer']['l1_alpha'],
-        device=device,
-    )
-
-    new_expr_objects: List[Expression] = []
-    for expr_str in new_expr_strings:
-        try:
-            new_expr_objects.append(parser.parse(expr_str))
-        except Exception as exc:
-            logger.debug(f"Dropping unparsable expression {expr_str}: {exc}")
-
-    if not new_expr_objects:
-        logger.warning("Stage 1 combo augmentation yielded no valid expressions; retaining original pool")
-        return pool
-
-    new_pool.force_load_exprs(new_expr_objects)
-    return new_pool
-
-
 def create_stock_data_slice(
     data_context: DataContext,
     start_date: str,
     end_date: str,
     device: torch.device,
     universe,
-    include_fundamentals: bool,
 ) -> StockData:
     """
     Create a StockData view for the requested window regardless of data source.
@@ -679,7 +452,7 @@ def create_stock_data_slice(
 
     # For qlib data source, StockData handles loading extra future data
     # via max_future_days parameter, which should be >= forward_horizon
-    features = list(FeatureType) if include_fundamentals else None
+    features = list(data_context.price_features)
     return StockData(
         instrument=universe,
         start_time=start_date,
@@ -881,11 +654,14 @@ class EnsembleTrainingCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         # Log progress every 2000 steps
-        if self.num_timesteps % 2000 == 0 and self.python_logger:
+        if self.num_timesteps % 2000 == 0 and self.training_env is not None:
             pool = self.training_env.envs[0].unwrapped.pool
-            self.python_logger.info(
-                f"Steps: {self.num_timesteps}, Pool size: {pool.size}, Best IC: {pool.best_ic_ret:.6f}"
-            )
+            message = f"Steps: {self.num_timesteps}, Pool size: {pool.size}, Best IC: {pool.best_ic_ret:.6f}"
+            if self.python_logger:
+                self.python_logger.info(message)
+            self.logger.record(f'{self.window_name}/pool_size_step', pool.size)
+            self.logger.record(f'{self.window_name}/best_ic_step', pool.best_ic_ret)
+            self.logger.dump(step=self.num_timesteps)
         return True
 
     def _on_rollout_end(self) -> None:
@@ -947,7 +723,7 @@ class EnsembleTrainingCallback(BaseCallback):
 
 
 # ============================================================================
-# DUAL-STAGE TRAINING
+# SINGLE-STAGE TRAINING
 # ============================================================================
 def train_single_window(
     window_name: str,
@@ -959,7 +735,7 @@ def train_single_window(
     data_context: DataContext,
 ) -> Dict[str, Any]:
     """
-    Train factors for a single time window using dual-stage approach.
+    Train factors for a single time window using a price-feature sweep.
 
     Returns:
         Dictionary with training results and pool data.
@@ -994,14 +770,14 @@ def train_single_window(
     # STAGE 1: Technical/Price-Only Sweep
     # ========================================================================
     stage1_config = training_config['stage1_technical']
+    reward_config = training_config.get('reward', {})
+    turnover_penalty_coeff = reward_config.get('turnover_penalty_coeff', training_config.get('turnover_penalty_coeff', 0.0))
+    objective_description = reward_config.get('objective', 'IC + ICIR - turnover_penalty')
+    if objective_description:
+        logger.info(f"Reward objective: {objective_description} (turnover_penalty_coeff={turnover_penalty_coeff})")
     stage1_pool: Dict[str, List[Any]]
     if stage1_config.get('enabled', True):
         logger.info(f"Stage 1: Technical/price-only sweep")
-
-        include_fundamentals_stage1 = (
-            stage1_config.get('use_fundamentals', False)
-            or stage1_config.get('load_fundamentals_for_scaling', True)
-        )
 
         data = create_stock_data_slice(
             data_context=data_context,
@@ -1009,7 +785,6 @@ def train_single_window(
             end_date=end_date,
             device=device,
             universe=universe,
-            include_fundamentals=include_fundamentals_stage1,
         )
 
         # Create calculator
@@ -1020,7 +795,7 @@ def train_single_window(
             calculator=calculator,
             ic_lower_bound=config['ensemble'].get('ic_lower_bound', 0.01),
             l1_alpha=config['ensemble']['optimizer']['l1_alpha'],
-            turnover_penalty_coeff=training_config.get('turnover_penalty_coeff', 0.1),
+            turnover_penalty_coeff=turnover_penalty_coeff,
             device=device
         )
 
@@ -1033,10 +808,7 @@ def train_single_window(
         )
 
         # Create environment
-        if stage1_config.get('use_fundamentals', False):
-            allowed_features = tuple(data_context.features) if data_context.features else None
-        else:
-            allowed_features = tuple(data_context.price_features)
+        allowed_features = tuple(data_context.price_features)
         env = AlphaEnv(
             pool=pool,
             device=device,
@@ -1092,6 +864,7 @@ def train_single_window(
             logger.info(f"Saved stage 1 pool to {pool_path}")
 
         logger.info(f"Stage 1 complete: {pool.size} factors, IC={pool.best_ic_ret:.4f}")
+        final_pool = stage1_pool
     else:
         logger.info("Stage 1 disabled; skipping technical sweep")
         stage1_pool = {'exprs': [], 'weights': []}
@@ -1101,190 +874,6 @@ def train_single_window(
             'expressions': [],
             'weights': [],
         }
-
-    # ========================================================================
-    # STAGE 2: Top Quartile + Fundamentals
-    # ========================================================================
-    stage2_config = training_config['stage2_fundamentals']
-    stage1_exprs = results['stages']['stage1']['expressions']
-    stage2_allowed = (
-        stage2_config.get('enabled', False)
-        and stage1_config.get('enabled', True)
-        and len(stage1_exprs) > 0
-    )
-
-    if stage2_allowed:
-        logger.info(f"\nStage 2: Retraining top quartile with fundamentals")
-
-        # Get top quartile from stage 1
-        stage1_results = results['stages']['stage1']
-        n_factors = len(stage1_results['expressions'])
-        top_n = max(1, n_factors // 4)  # Top 25%
-
-        # Sort by absolute weight (importance)
-        factor_scores = [
-            (expr, abs(weight))
-            for expr, weight in zip(stage1_results['expressions'], stage1_results['weights'])
-        ]
-        factor_scores.sort(key=lambda x: x[1], reverse=True)
-        top_factors = [expr for expr, _ in factor_scores[:top_n]]
-
-        logger.info(f"Selected top {top_n} factors from stage 1 (top 25%)")
-
-        combo_config = stage2_config.get('fundamental_combos', {})
-        if combo_config.get('enabled', True):
-            fundamental_features = get_fundamental_feature_types(data_context)
-            augmented = generate_fundamental_combos(
-                base_exprs=top_factors,
-                fundamental_features=fundamental_features,
-                combo_config=combo_config,
-                logger=logger,
-            )
-            if augmented:
-                logger.info(f"Generated {len(augmented)} fundamental augmentations from stage 1 factors")
-                dedup = dict.fromkeys(top_factors + augmented)
-                top_factors = list(dedup.keys())
-
-        # Create data WITH fundamentals
-        data = create_stock_data_slice(
-            data_context=data_context,
-            start_date=start_date,
-            end_date=end_date,
-            device=device,
-            universe=universe,
-            include_fundamentals=True,
-        )
-
-        calculator = QLibStockDataCalculator(data, target)
-
-        # Create new pool and initialize with top factors
-        pool = CustomRewardAlphaPool(
-            capacity=training_config['pool_capacity_per_window'],
-            calculator=calculator,
-            ic_lower_bound=config['ensemble'].get('ic_lower_bound', 0.01),
-            l1_alpha=config['ensemble']['optimizer']['l1_alpha'],
-            turnover_penalty_coeff=training_config.get('turnover_penalty_coeff', 0.1),
-            device=device
-        )
-
-        # Parse and load top factors
-        parser = ExpressionParser(Operators)
-        top_exprs = [parser.parse(expr_str) for expr_str in top_factors]
-        if top_exprs:
-            pool.force_load_exprs(top_exprs)
-            logger.info(f"Initialized pool with {pool.size} expressions from stage 1")
-        else:
-            logger.warning("No expressions available for stage 2 warm start; proceeding without seeding.")
-
-        # Continue training with fundamentals enabled
-        allowed_features_stage2 = tuple(data_context.features) if data_context.features else None
-        env = AlphaEnv(
-            pool=pool,
-            device=device,
-            print_expr=True,
-            allowed_features=allowed_features_stage2,
-        )
-
-        model = MaskablePPO(
-            'MlpPolicy',
-            env,
-            policy_kwargs=dict(
-                features_extractor_class=LSTMSharedNet,
-                features_extractor_kwargs=dict(n_layers=2, d_model=128, dropout=0.1, device=device),
-            ),
-            learning_rate=ppo_config['learning_rate'],
-            gamma=ppo_config['gamma'],
-            ent_coef=ppo_config['entropy_coef'],
-            vf_coef=ppo_config['value_loss_coef'],
-            verbose=0,  # Set to 0 to avoid colorama conflicts on Windows
-            tensorboard_log=str(output_dir / 'tensorboard_stage2')
-        )
-
-        callback = EnsembleTrainingCallback(
-            save_path=str(output_dir),
-            window_name=f"{window_name}_stage2",
-            early_stopping_patience=stage2_config['early_stopping_patience'],
-            python_logger=logger
-        )
-
-        max_steps = stage2_config['max_episodes'] * 200
-        logger.info(f"Training Stage 2 for up to {stage2_config['max_episodes']} episodes...")
-        model.learn(total_timesteps=max_steps, callback=callback)
-
-        # Decide whether pruning is appropriate
-        stage2_pool_snapshot = pool.to_json_dict()
-        current_exprs = stage2_pool_snapshot['exprs'][:pool.size]
-
-        price_feature_set = set(data_context.price_features or ())
-        all_features = tuple(data_context.features) if data_context.features else ()
-        fundamental_tokens = {
-            f"${feature.name.lower()}"
-            for feature in all_features
-            if feature not in price_feature_set
-        }
-        has_fundamental_expr = bool(fundamental_tokens) and any(
-            any(token in expr for token in fundamental_tokens)
-            for expr in current_exprs
-        )
-
-        stage1_best_ic = stage1_results.get('best_ic', float('nan'))
-        ic_improved = (
-            not math.isnan(stage1_best_ic)
-            and pool.best_ic_ret > stage1_best_ic + 1e-5
-        )
-
-        target_size = stage2_config['target_factors_per_window']
-        should_prune = (
-            target_size
-            and target_size > 0
-            and pool.size > target_size
-            and ic_improved
-        )
-
-        if should_prune:
-            logger.info(f"Pruning pool from {pool.size} to {target_size} factors")
-            # Keep top factors by absolute weight
-            weights = pool.weights[:pool.size]
-            exprs = pool.exprs[:pool.size]
-            sorted_indices = np.argsort(-np.abs(weights))[:target_size]
-            pruned_exprs = [exprs[i] for i in sorted_indices]
-            pool.force_load_exprs(pruned_exprs)
-            stage2_pool = pool.to_json_dict()
-        else:
-            if target_size and pool.size > target_size:
-                logger.info(
-                    "Skipping pruning because stage 2 did not improve IC over stage 1"
-                )
-            stage2_pool = stage2_pool_snapshot
-
-        # Save stage 2 results
-        results['stages']['stage2'] = {
-            'pool_size': pool.size,
-            'best_ic': float(pool.best_ic_ret),
-            'expressions': stage2_pool['exprs'][:pool.size],
-            'weights': [float(w) for w in stage2_pool['weights'][:pool.size]]
-        }
-
-        # Save stage 2 pool if enabled
-        if config.get('output', {}).get('save_stage_pool', False):
-            pool_path = config['output']['stage2_pool'].format(window_name=window_name)
-            os.makedirs(os.path.dirname(pool_path), exist_ok=True)
-            with open(pool_path, 'w') as f:
-                json.dump(stage2_pool, f, indent=2)
-            logger.info(f"Saved stage 2 pool to {pool_path}")
-
-        logger.info(f"Stage 2 complete: {pool.size} factors, IC={pool.best_ic_ret:.4f}")
-
-        # Use stage 2 as final
-        final_pool = stage2_pool
-    elif stage2_config.get('enabled', False) and len(stage1_exprs) == 0:
-        logger.warning("Stage 2 was requested but stage 1 produced no factors; using stage 1 pool.")
-        final_pool = stage1_pool
-    else:
-        if stage2_config.get('enabled', False):
-            logger.info("Stage 2 disabled or not applicable; using stage 1 pool as final.")
-        else:
-            logger.info("Stage 2 not enabled; retaining stage 1 pool.")
         final_pool = stage1_pool
 
     # Save final pool for this window
@@ -1447,7 +1036,6 @@ def merge_and_optimize_ensemble(
         end_date=validation_config['end_date'],
         device=device,
         universe=universe,
-        include_fundamentals=True,
     )
 
     # Create target

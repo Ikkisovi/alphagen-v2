@@ -69,22 +69,16 @@ def create_test_config(base_config_path: Path) -> dict:
 
     # Reduce training episodes for quick test
     original_stage1 = config['training']['stage1_technical']['max_episodes']
-    original_stage2 = config['training']['stage2_fundamentals']['max_episodes']
 
     config['training']['stage1_technical']['max_episodes'] = 50
     config['training']['stage1_technical']['min_episodes'] = 30
     config['training']['stage1_technical']['early_stopping_patience'] = 10
-
-    config['training']['stage2_fundamentals']['max_episodes'] = 50
-    config['training']['stage2_fundamentals']['min_episodes'] = 30
-    config['training']['stage2_fundamentals']['early_stopping_patience'] = 10
 
     # Reduce pool capacity
     config['training']['pool_capacity_per_window'] = 15
     config['ensemble']['final_capacity'] = 30
 
     print(f"  Stage 1 episodes: {original_stage1} → {config['training']['stage1_technical']['max_episodes']} (test mode)")
-    print(f"  Stage 2 episodes: {original_stage2} → {config['training']['stage2_fundamentals']['max_episodes']} (test mode)")
     print(f"  Pool capacity: 25 → {config['training']['pool_capacity_per_window']} (test mode)")
     print(f"  Final capacity: 45 → {config['ensemble']['final_capacity']} (test mode)")
 
