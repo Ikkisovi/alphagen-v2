@@ -14,6 +14,7 @@ Usage:
     python scripts/train_ensemble.py --skip-training  # Use cached pools only
 """
 
+import fnmatch
 import json
 import os
 import logging
@@ -34,7 +35,11 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from alphagen.data.expression import *
 from alphagen.data.parser import ExpressionParser
-from alphagen.local_data import LocalDataConfig, load_local_stock_data
+from alphagen.local_data import (
+    LocalDataConfig,
+    build_feature_store_stock_data,
+    load_local_stock_data,
+)
 from alphagen.models.linear_alpha_pool import MseAlphaPool, CustomRewardAlphaPool
 from alphagen.rl.env.wrapper import AlphaEnv
 from alphagen.rl.policy import LSTMSharedNet
@@ -42,6 +47,7 @@ from alphagen.utils import reseed_everything
 from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.stock_data import StockData, FeatureType, initialize_qlib
 from alphagen_generic.operators import Operators
+from alphagen_data_pipeline.storage import load_features as load_feature_store
 
 
 
@@ -96,6 +102,21 @@ def initialize_data_context(
     source = data_cfg.get('source', 'qlib').lower()
     forward_horizon = int(data_cfg.get('forward_horizon', 20))
     context = DataContext(source=source, forward_horizon=forward_horizon)
+
+    def _infer_date_bounds() -> Tuple[Optional[str], Optional[str]]:
+        windows = config.get('time_windows', {})
+        starts: List[pd.Timestamp] = []
+        ends: List[pd.Timestamp] = []
+        for window in windows.values():
+            start = window.get('start_date')
+            end = window.get('end_date')
+            if start:
+                starts.append(pd.to_datetime(start))
+            if end:
+                ends.append(pd.to_datetime(end))
+        if not starts or not ends:
+            return None, None
+        return str(min(starts).date()), str(max(ends).date())
 
     if source == 'merged':
         data_path = Path(data_cfg.get('path', 'data/merged/merged_data.parquet'))
@@ -170,6 +191,128 @@ def initialize_data_context(
         logger.info(
             "Loaded merged dataset: %s → %s (days=%d, symbols=%d, features=%d, "
             "max_future_days=%d)",
+            stock_data._start_time,
+            stock_data._end_time,
+            stock_data.n_days,
+            stock_data.n_stocks,
+            stock_data.n_features,
+            stock_data.max_future_days,
+        )
+    elif source == 'feature_store':
+        raw_store_path = data_cfg.get('path')
+        if not raw_store_path:
+            raise ValueError("Feature store path must be provided when source=feature_store")
+        store_path = Path(raw_store_path).expanduser()
+
+        features_cfg = data_cfg.get('features')
+        price_features_cfg = data_cfg.get('price_features')
+        feature_patterns = data_cfg.get('feature_patterns')
+        session_list = data_cfg.get('sessions')
+        timezone = data_cfg.get('timezone', 'UTC')
+        session_time_map = data_cfg.get('session_time_map')
+        symbols = data_cfg.get('symbols')
+
+        features = tuple(
+            parse_feature_names(features_cfg)
+            if features_cfg
+            else list(FeatureType)
+        )
+        context.features = features
+
+        if price_features_cfg:
+            context.price_features = tuple(parse_feature_names(price_features_cfg))
+
+        preload_cfg = data_cfg.get('preload', {})
+        start = preload_cfg.get('start')
+        end = preload_cfg.get('end')
+        inferred_start, inferred_end = _infer_date_bounds()
+        if start is None:
+            start = inferred_start
+        if end is None:
+            end = inferred_end
+        if start is None or end is None:
+            raise ValueError("Unable to infer feature store preload date range; specify data.preload.start/end")
+
+        sessions = [str(sess).upper() for sess in session_list] if session_list else None
+
+        logger.info(
+            "Loading feature store from %s for %s → %s", store_path, start, end
+        )
+        feature_frame = load_feature_store(
+            str(store_path),
+            start=start,
+            end=end,
+            feature_patterns=feature_patterns,
+            symbols=symbols,
+            sessions=sessions,
+        )
+
+        if feature_frame.empty:
+            raise ValueError(
+                f"Feature store query returned no rows for range {start} → {end}"
+            )
+
+        session_counts = feature_frame.groupby(['symbol', 'date'])['session'].nunique()
+        if not session_counts.empty:
+            approx_points = float(session_counts.mean())
+            logger.info(
+                "Detected approximately %.2f sessions per trading day in feature store",
+                approx_points,
+            )
+            if approx_points > 1.5:
+                adjustment_factor = max(1, int(round(approx_points)))
+                original_horizon = forward_horizon
+                forward_horizon *= adjustment_factor
+                logger.info(
+                    "Adjusting forward_horizon by factor %d (original=%d, new=%d)",
+                    adjustment_factor,
+                    original_horizon,
+                    forward_horizon,
+                )
+        else:
+            logger.warning(
+                "Unable to determine session density; using configured forward_horizon=%d",
+                forward_horizon,
+            )
+
+        context.forward_horizon = forward_horizon
+
+        configured_future_days = int(data_cfg.get('max_future_days', 0)) if 'max_future_days' in data_cfg else 0
+        required_future_days = forward_horizon + 10
+        max_future_days = max(configured_future_days, required_future_days)
+
+        local_cfg = LocalDataConfig(
+            max_backtrack_days=int(data_cfg.get('max_backtrack_days', 120)),
+            max_future_days=max_future_days,
+            features=tuple(features),
+            device=device,
+        )
+
+        stock_data = build_feature_store_stock_data(
+            feature_frame,
+            config=local_cfg,
+            timezone=timezone,
+            session_time_map=session_time_map,
+        )
+        context.stock_data = stock_data
+
+        derived_features = list(data_cfg.get('derived_features', []))
+        derived_patterns = data_cfg.get('derived_feature_patterns', [])
+        if derived_patterns:
+            available_cols = set(feature_frame.columns) - {"symbol", "date", "session"}
+            for pattern in derived_patterns:
+                derived_features.extend(
+                    sorted(
+                        col for col in available_cols
+                        if fnmatch.fnmatch(col, pattern)
+                    )
+                )
+        if derived_features:
+            # Deduplicate while preserving order
+            context.derived_features = tuple(dict.fromkeys(derived_features))
+
+        logger.info(
+            "Loaded feature store dataset: %s → %s (days=%d, symbols=%d, features=%d, max_future_days=%d)",
             stock_data._start_time,
             stock_data._end_time,
             stock_data.n_days,
@@ -441,7 +584,7 @@ def create_stock_data_slice(
     Automatically extends end_date by forward_horizon to ensure we have enough
     future data to calculate forward returns.
     """
-    if data_context.source == 'merged':
+    if data_context.source in {'merged', 'feature_store'}:
         if data_context.stock_data is None:
             raise ValueError("Local stock data has not been loaded")
         base = data_context.stock_data
